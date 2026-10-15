@@ -7,10 +7,13 @@
 //! Any stream that implements [`embedded_io_async::Read`] and [`embedded_io_async::Write`]
 //! works, for example the `TcpSocket` of `embassy-net`.
 
+use core::ops::Range;
+
 use embedded_io_async::{Read, Write};
 use rand_core::RngCore;
 
 pub use crate::framer::{FramerError, ReadResult};
+pub use crate::framer_core::FramerState;
 use crate::{
     framer_core::{Decoded, FramerCore},
     WebSocket, WebSocketCloseStatusCode, WebSocketContext, WebSocketOptions,
@@ -19,11 +22,18 @@ use crate::{
 
 /// Reads and writes whole websocket messages over a async stream.
 ///
+/// # Cancel safety
+///
+/// All methods are cancel safe if the `read` and `write` methods of the stream are. When a
+/// future is dropped before it completes, the next call on a framer created from the same
+/// buffers and [`FramerState`] continues where it stopped: a partially received message is
+/// kept and a partially written frame is completed before anything else is written.
+///
 /// # Examples
 ///
 /// ```no_run
 /// use embedded_websocket::{
-///     framer_embedded_io_async::{Framer, FramerError, ReadResult},
+///     framer_embedded_io_async::{Framer, FramerError, FramerState, ReadResult},
 ///     WebSocketClient, WebSocketOptions, WebSocketSendMessageType,
 /// };
 ///
@@ -31,16 +41,11 @@ use crate::{
 ///     stream: &mut S,
 /// ) -> Result<(), FramerError<S::Error>> {
 ///     let mut read_buf = [0; 1024];
-///     let mut read_cursor = 0;
+///     let mut state = FramerState::new();
 ///     let mut write_buf = [0; 1024];
 ///     let mut frame_buf = [0; 1024];
 ///     let mut websocket = WebSocketClient::new_client(rand::thread_rng());
-///     let mut framer = Framer::new(
-///         &mut read_buf,
-///         &mut read_cursor,
-///         &mut write_buf,
-///         &mut websocket,
-///     );
+///     let mut framer = Framer::new(&mut read_buf, &mut state, &mut write_buf, &mut websocket);
 ///
 ///     let websocket_options = WebSocketOptions {
 ///         path: "/chat",
@@ -65,6 +70,7 @@ where
     TWebSocketType: WebSocketType,
 {
     core: FramerCore<'a, TRng, TWebSocketType>,
+    unsent: &'a mut Range<usize>,
 }
 
 impl<'a, TRng> Framer<'a, TRng, crate::Client>
@@ -92,8 +98,9 @@ where
     where
         S: Read + Write,
     {
+        self.send_unsent(stream).await?;
         let (len, web_socket_key) = self.core.encode_connect(websocket_options)?;
-        write_all(stream, self.core.written(len)).await?;
+        self.send(stream, len).await?;
 
         loop {
             let received_size = stream
@@ -133,8 +140,9 @@ where
     where
         S: Write,
     {
+        self.send_unsent(stream).await?;
         let len = self.core.encode_accept(websocket_context)?;
-        write_all(stream, self.core.written(len)).await
+        self.send(stream, len).await
     }
 }
 
@@ -148,20 +156,25 @@ where
     /// `read_buf` holds bytes read from the stream. It must fit the HTTP response header of the
     /// opening handshake and any control frame (up to 131 bytes).
     ///
-    /// `read_cursor` is the number of bytes at the start of `read_buf` that are not decoded
-    /// yet. Use 0 for a new connection. A framer created with the same `read_buf` and
-    /// `read_cursor` continues where the previous one stopped.
+    /// `state` tracks progress across framers. A framer created with the same buffers and
+    /// `state` continues where the previous one stopped.
     ///
     /// `write_buf` holds encoded frames. It must fit the largest payload you write plus the
     /// frame header (2 to 14 bytes).
     pub fn new(
         read_buf: &'a mut [u8],
-        read_cursor: &'a mut usize,
+        state: &'a mut FramerState,
         write_buf: &'a mut [u8],
         websocket: &'a mut WebSocket<TRng, TWebSocketType>,
     ) -> Self {
+        let FramerState {
+            read_cursor,
+            frame_cursor,
+            unsent,
+        } = state;
         Self {
-            core: FramerCore::new(read_buf, read_cursor, write_buf, websocket),
+            core: FramerCore::resume(read_buf, read_cursor, frame_cursor, write_buf, websocket),
+            unsent,
         }
     }
 
@@ -187,8 +200,9 @@ where
     where
         S: Write,
     {
+        self.send_unsent(stream).await?;
         let len = self.core.encode_close(close_status, status_description)?;
-        write_all(stream, self.core.written(len)).await
+        self.send(stream, len).await
     }
 
     /// Writes `frame_buf` to the stream as one websocket frame.
@@ -211,10 +225,11 @@ where
     where
         S: Write,
     {
+        self.send_unsent(stream).await?;
         let len = self
             .core
             .encode_write(message_type, end_of_message, frame_buf)?;
-        write_all(stream, self.core.written(len)).await
+        self.send(stream, len).await
     }
 
     /// Reads from the stream until a whole message arrived.
@@ -222,6 +237,9 @@ where
     /// Answers ping messages with a pong message and completes a close handshake the other party
     /// initiated. Returns [`ReadResult::Closed`] when the close handshake is complete or the
     /// stream ended.
+    ///
+    /// Pass the same `frame_buf` to every call: a call that is cancelled may leave the first
+    /// frames of a message in it.
     ///
     /// # Errors
     ///
@@ -238,6 +256,7 @@ where
     where
         S: Read + Write,
     {
+        self.send_unsent(stream).await?;
         loop {
             match self.core.decode(frame_buf)? {
                 Decoded::NeedMoreData => {
@@ -251,28 +270,51 @@ where
                     self.core.commit_read(len);
                 }
                 Decoded::SendThenContinue(len) => {
-                    write_all(stream, self.core.written(len)).await?;
+                    self.send(stream, len).await?;
                 }
                 Decoded::SendThenClosed(len) => {
-                    write_all(stream, self.core.written(len)).await?;
+                    self.send(stream, len).await?;
                     return Ok(ReadResult::Closed);
                 }
                 Decoded::Message(message) => return message.into_read_result(frame_buf),
             }
         }
     }
-}
 
-async fn write_all<S: Write>(stream: &mut S, buf: &[u8]) -> Result<(), FramerError<S::Error>> {
-    stream.write_all(buf).await.map_err(FramerError::Io)?;
-    stream.flush().await.map_err(FramerError::Io)
+    async fn send<S: Write>(
+        &mut self,
+        stream: &mut S,
+        len: usize,
+    ) -> Result<(), FramerError<S::Error>> {
+        *self.unsent = 0..len;
+        self.send_unsent(stream).await
+    }
+
+    async fn send_unsent<S: Write>(&mut self, stream: &mut S) -> Result<(), FramerError<S::Error>> {
+        if self.unsent.start == self.unsent.end {
+            return Ok(());
+        }
+        while self.unsent.start < self.unsent.end {
+            let unsent = &self.core.written(self.unsent.end)[self.unsent.start..];
+            match stream.write(unsent).await.map_err(FramerError::Io)? {
+                0 => panic!("write() returned Ok(0)"),
+                written => self.unsent.start += written,
+            }
+        }
+        stream.flush().await.map_err(FramerError::Io)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     extern crate std;
 
-    use std::{vec, vec::Vec};
+    use core::{
+        future::Future,
+        pin::pin,
+        task::{Context, Poll, Waker},
+    };
+    use std::{collections::VecDeque, vec, vec::Vec};
 
     use super::*;
     use crate::{WebSocketClient, WebSocketOpCode, WebSocketServer};
@@ -327,15 +369,10 @@ mod tests {
 
         let mut read_buf = vec![0; 1024];
         let mut write_buf = vec![0; 1024];
-        let mut read_cursor = 0;
+        let mut state = FramerState::default();
         let mut ws_client = WebSocketClient::new_client(rand::thread_rng());
         ws_client.state = WebSocketState::Open;
-        let mut framer = Framer::new(
-            &mut read_buf,
-            &mut read_cursor,
-            &mut write_buf,
-            &mut ws_client,
-        );
+        let mut framer = Framer::new(&mut read_buf, &mut state, &mut write_buf, &mut ws_client);
         let mut stream = OneBytePerReadStream {
             read_buf: frames,
             read_cursor: 0,
@@ -354,5 +391,137 @@ mod tests {
             framer.read(&mut stream, &mut frame_buf).await.unwrap(),
             ReadResult::Closed
         ));
+    }
+
+    struct ScriptedStream {
+        chunks: VecDeque<Vec<u8>>,
+        write_budget: usize,
+        written: Vec<u8>,
+    }
+
+    impl ScriptedStream {
+        fn new() -> Self {
+            Self {
+                chunks: VecDeque::new(),
+                write_budget: usize::MAX,
+                written: Vec::new(),
+            }
+        }
+    }
+
+    impl embedded_io_async::ErrorType for ScriptedStream {
+        type Error = core::convert::Infallible;
+    }
+
+    impl Read for ScriptedStream {
+        async fn read(&mut self, buf: &mut [u8]) -> Result<usize, Self::Error> {
+            let Some(chunk) = self.chunks.pop_front() else {
+                return core::future::pending().await;
+            };
+            buf[..chunk.len()].copy_from_slice(&chunk);
+            Ok(chunk.len())
+        }
+    }
+
+    impl Write for ScriptedStream {
+        async fn write(&mut self, buf: &[u8]) -> Result<usize, Self::Error> {
+            if self.write_budget == 0 {
+                return core::future::pending().await;
+            }
+            let len = buf.len().min(self.write_budget);
+            self.write_budget -= len;
+            self.written.extend_from_slice(&buf[..len]);
+            Ok(len)
+        }
+
+        async fn flush(&mut self) -> Result<(), Self::Error> {
+            Ok(())
+        }
+    }
+
+    fn client_frame(payload: &[u8], op_code: WebSocketOpCode, fin: bool) -> Vec<u8> {
+        let mut ws_client = WebSocketClient::new_client(rand::thread_rng());
+        let mut frame = vec![0; 256];
+        let len = ws_client
+            .write_frame(payload, &mut frame, op_code, fin)
+            .unwrap();
+        frame.truncate(len);
+        frame
+    }
+
+    fn poll_once<F: Future>(future: F) -> Poll<F::Output> {
+        let mut future = pin!(future);
+        future
+            .as_mut()
+            .poll(&mut Context::from_waker(Waker::noop()))
+    }
+
+    #[tokio::test]
+    async fn cancelled_read_keeps_first_frames_of_message() {
+        let mut read_buf = vec![0; 1024];
+        let mut write_buf = vec![0; 1024];
+        let mut frame_buf = vec![0; 1024];
+        let mut state = FramerState::default();
+        let mut ws_server = WebSocketServer::new_server();
+        ws_server.state = WebSocketState::Open;
+        let mut stream = ScriptedStream::new();
+
+        stream
+            .chunks
+            .push_back(client_frame(b"hello", WebSocketOpCode::TextFrame, false));
+        let mut framer = Framer::new(&mut read_buf, &mut state, &mut write_buf, &mut ws_server);
+        assert!(poll_once(framer.read(&mut stream, &mut frame_buf)).is_pending());
+
+        stream.chunks.push_back(client_frame(
+            b" world!",
+            WebSocketOpCode::ContinuationFrame,
+            true,
+        ));
+        let mut framer = Framer::new(&mut read_buf, &mut state, &mut write_buf, &mut ws_server);
+        match framer.read(&mut stream, &mut frame_buf).await.unwrap() {
+            ReadResult::Text(text) => assert_eq!(text, "hello world!"),
+            _ => panic!("expected text frame"),
+        }
+    }
+
+    #[tokio::test]
+    async fn cancelled_pong_is_completed_before_next_write() {
+        let mut read_buf = vec![0; 1024];
+        let mut write_buf = vec![0; 1024];
+        let mut frame_buf = vec![0; 1024];
+        let mut state = FramerState::default();
+        let mut ws_server = WebSocketServer::new_server();
+        ws_server.state = WebSocketState::Open;
+        let mut stream = ScriptedStream::new();
+        stream
+            .chunks
+            .push_back(client_frame(b"ping", WebSocketOpCode::Ping, true));
+        stream.write_budget = 1;
+
+        let mut framer = Framer::new(&mut read_buf, &mut state, &mut write_buf, &mut ws_server);
+        assert!(poll_once(framer.read(&mut stream, &mut frame_buf)).is_pending());
+        assert_eq!(stream.written.len(), 1);
+
+        stream.write_budget = usize::MAX;
+        let mut framer = Framer::new(&mut read_buf, &mut state, &mut write_buf, &mut ws_server);
+        framer
+            .write(&mut stream, WebSocketSendMessageType::Text, true, b"next")
+            .await
+            .unwrap();
+
+        let mut expected_server = WebSocketServer::new_server();
+        let mut expected = vec![0; 64];
+        let pong_len = expected_server
+            .write_frame(b"ping", &mut expected, WebSocketOpCode::Pong, true)
+            .unwrap();
+        let text_len = expected_server
+            .write_frame(
+                b"next",
+                &mut expected[pong_len..],
+                WebSocketOpCode::TextFrame,
+                true,
+            )
+            .unwrap();
+        assert_eq!(stream.written, &expected[..pong_len + text_len]);
     }
 }

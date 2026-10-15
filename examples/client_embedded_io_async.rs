@@ -8,7 +8,7 @@
 
 use embedded_io_adapters::tokio_1::FromTokio;
 use embedded_websocket::{
-    framer_embedded_io_async::{Framer, FramerError, ReadResult},
+    framer_embedded_io_async::{Framer, FramerError, FramerState, ReadResult},
     WebSocketClient, WebSocketCloseStatusCode, WebSocketOptions, WebSocketSendMessageType,
 };
 use std::error::Error;
@@ -23,7 +23,7 @@ async fn main() -> Result<(), FramerError<impl Error>> {
     println!("Connected.");
 
     let mut read_buf = [0; 4000];
-    let mut read_cursor = 0;
+    let mut state = FramerState::default();
     let mut write_buf = [0; 4000];
     let mut frame_buf = [0; 4000];
     let mut websocket = WebSocketClient::new_client(rand::thread_rng());
@@ -36,12 +36,7 @@ async fn main() -> Result<(), FramerError<impl Error>> {
         additional_headers: None,
     };
 
-    let mut framer = Framer::new(
-        &mut read_buf,
-        &mut read_cursor,
-        &mut write_buf,
-        &mut websocket,
-    );
+    let mut framer = Framer::new(&mut read_buf, &mut state, &mut write_buf, &mut websocket);
     framer.connect(&mut stream, &websocket_options).await?;
 
     let message = "Hello, World!";

@@ -39,6 +39,36 @@ impl Message {
     }
 }
 
+/// Progress of a connection that outlives a single framer call.
+///
+/// Keep one per connection and pass it to every framer created for that connection. Use
+/// [`FramerState::new`] for a new connection.
+#[cfg(any(feature = "embedded-io", feature = "embedded-io-async"))]
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct FramerState {
+    pub(crate) read_cursor: usize,
+    pub(crate) frame_cursor: usize,
+    pub(crate) unsent: Range<usize>,
+}
+
+#[cfg(any(feature = "embedded-io", feature = "embedded-io-async"))]
+impl FramerState {
+    /// Creates the state for a new connection.
+    pub const fn new() -> Self {
+        Self::with_buffered(0)
+    }
+
+    /// Creates the state for a connection whose read buffer already starts with `len` bytes
+    /// that arrived after the HTTP header of the opening handshake.
+    pub const fn with_buffered(len: usize) -> Self {
+        Self {
+            read_cursor: len,
+            frame_cursor: 0,
+            unsent: 0..0,
+        }
+    }
+}
+
 pub(crate) struct FramerCore<'a, TRng, TWebSocketType>
 where
     TRng: RngCore,
@@ -49,7 +79,7 @@ where
     // `read_len` continues where the previous one stopped.
     read_len: &'a mut usize,
     write_buf: &'a mut [u8],
-    frame_cursor: usize,
+    frame_cursor: FrameCursor<'a>,
     websocket: &'a mut WebSocket<TRng, TWebSocketType>,
 }
 
@@ -121,7 +151,24 @@ where
             read_buf,
             read_len,
             write_buf,
-            frame_cursor: 0,
+            frame_cursor: FrameCursor::Owned(0),
+            websocket,
+        }
+    }
+
+    #[cfg(any(feature = "embedded-io", feature = "embedded-io-async"))]
+    pub(crate) fn resume(
+        read_buf: &'a mut [u8],
+        read_len: &'a mut usize,
+        frame_cursor: &'a mut usize,
+        write_buf: &'a mut [u8],
+        websocket: &'a mut WebSocket<TRng, TWebSocketType>,
+    ) -> Self {
+        Self {
+            read_buf,
+            read_len,
+            write_buf,
+            frame_cursor: FrameCursor::Borrowed(frame_cursor),
             websocket,
         }
     }
@@ -179,7 +226,7 @@ where
                 Ok(Some(len)) if len.total > buffered.len() => {
                     return self.need_more_data();
                 }
-                Ok(Some(len)) if self.frame_cursor + len.payload > frame_buf.len() => {
+                Ok(Some(len)) if *self.frame_cursor + len.payload > frame_buf.len() => {
                     return Err(FramerError::FrameTooLarge(frame_buf.len()));
                 }
                 Ok(_) => {}
@@ -187,13 +234,13 @@ where
                 Err(e) => return Err(FramerError::WebSocket(e)),
             }
 
-            if self.frame_cursor >= frame_buf.len() {
+            if *self.frame_cursor >= frame_buf.len() {
                 return Err(FramerError::FrameTooLarge(frame_buf.len()));
             }
 
             let ws_result = match self
                 .websocket
-                .read(buffered, &mut frame_buf[self.frame_cursor..])
+                .read(buffered, &mut frame_buf[*self.frame_cursor..])
             {
                 Ok(ws_result) => ws_result,
                 Err(crate::Error::ReadFrameIncomplete) => return self.need_more_data(),
@@ -201,12 +248,12 @@ where
             };
             self.consume(ws_result.len_from);
 
-            let payload = self.frame_cursor..self.frame_cursor + ws_result.len_to;
+            let payload = *self.frame_cursor..*self.frame_cursor + ws_result.len_to;
             match ws_result.message_type {
                 WebSocketReceiveMessageType::Binary | WebSocketReceiveMessageType::Text => {
-                    self.frame_cursor = payload.end;
+                    *self.frame_cursor = payload.end;
                     if ws_result.end_of_message {
-                        self.frame_cursor = 0;
+                        *self.frame_cursor = 0;
                         return Ok(Decoded::Message(
                             if ws_result.message_type == WebSocketReceiveMessageType::Binary {
                                 Message::Binary(payload.end)
@@ -253,5 +300,34 @@ where
     fn consume(&mut self, len: usize) {
         self.read_buf.copy_within(len..*self.read_len, 0);
         *self.read_len -= len;
+    }
+}
+
+#[cfg_attr(
+    not(any(feature = "embedded-io", feature = "embedded-io-async")),
+    allow(dead_code)
+)]
+enum FrameCursor<'a> {
+    Owned(usize),
+    Borrowed(&'a mut usize),
+}
+
+impl core::ops::Deref for FrameCursor<'_> {
+    type Target = usize;
+
+    fn deref(&self) -> &usize {
+        match self {
+            FrameCursor::Owned(cursor) => cursor,
+            FrameCursor::Borrowed(cursor) => cursor,
+        }
+    }
+}
+
+impl core::ops::DerefMut for FrameCursor<'_> {
+    fn deref_mut(&mut self) -> &mut usize {
+        match self {
+            FrameCursor::Owned(cursor) => cursor,
+            FrameCursor::Borrowed(cursor) => cursor,
+        }
     }
 }

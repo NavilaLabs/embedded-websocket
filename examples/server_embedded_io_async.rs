@@ -18,7 +18,7 @@ use tokio::net::{TcpListener, TcpStream};
 
 use embedded_websocket::{
     self as ws,
-    framer_embedded_io_async::{Framer, FramerError, ReadResult},
+    framer_embedded_io_async::{Framer, FramerError, FramerState, ReadResult},
     WebSocketContext, WebSocketSendMessageType, WebSocketServer,
 };
 
@@ -87,12 +87,8 @@ async fn handle_client(stream: TcpStream) -> Result<()> {
         let mut write_buf = [0; 4000];
         let mut frame_buf = [0; 4000];
         let mut websocket = WebSocketServer::new_server();
-        let mut framer = Framer::new(
-            &mut read_buf,
-            &mut read_cursor,
-            &mut write_buf,
-            &mut websocket,
-        );
+        let mut state = FramerState::with_buffered(read_cursor);
+        let mut framer = Framer::new(&mut read_buf, &mut state, &mut write_buf, &mut websocket);
 
         // complete the opening handshake with the client
         framer.accept(&mut stream, &websocket_context).await?;
