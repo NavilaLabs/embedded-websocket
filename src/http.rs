@@ -50,16 +50,13 @@ pub fn read_http_header<'a>(
         } else if name.eq_ignore_ascii_case("sec-websocket-protocol") {
             // extract a csv list of supported sub protocols
             for item in str::from_utf8(value)?.split(", ") {
-                if sec_websocket_protocol_list.len() < sec_websocket_protocol_list.capacity() {
-                    // it is safe to unwrap here because we have checked
-                    // the size of the list beforehand
-                    sec_websocket_protocol_list
-                        .push(String::from(item))
-                        .unwrap();
+                // sub protocols that do not fit are skipped, so the server never selects them
+                if let Ok(item) = String::try_from(item) {
+                    let _ = sec_websocket_protocol_list.push(item);
                 }
             }
         } else if name.eq_ignore_ascii_case("sec-websocket-key") {
-            sec_websocket_key = String::from(str::from_utf8(value)?);
+            sec_websocket_key = String::try_from(str::from_utf8(value)?)?;
         }
     }
 
@@ -104,7 +101,7 @@ pub fn read_server_connect_handshake_response(
                         return Err(Error::AcceptStringInvalid);
                     }
                 } else if item.name.eq_ignore_ascii_case("sec-websocket-protocol") {
-                    sec_websocket_protocol = Some(String::from(str::from_utf8(item.value)?));
+                    sec_websocket_protocol = Some(String::try_from(str::from_utf8(item.value)?)?);
                 }
             }
 
@@ -116,7 +113,7 @@ pub fn read_server_connect_handshake_response(
 
 pub fn build_connect_handshake_request(
     websocket_options: &WebSocketOptions,
-    rng: &mut impl RngCore,
+    rng: &mut impl Rng,
     to: &mut [u8],
 ) -> Result<(usize, WebSocketKey)> {
     let mut http_request: String<1024> = String::new();
@@ -125,7 +122,7 @@ pub fn build_connect_handshake_request(
     let mut key: [u8; 16] = [0; 16];
     rng.fill_bytes(&mut key);
     base64::encode_config_slice(key, base64::STANDARD, &mut key_as_base64);
-    let sec_websocket_key: String<24> = String::from(str::from_utf8(&key_as_base64)?);
+    let sec_websocket_key: String<24> = String::try_from(str::from_utf8(&key_as_base64)?)?;
 
     http_request.push_str("GET ")?;
     http_request.push_str(websocket_options.path)?;
@@ -203,4 +200,32 @@ pub fn build_accept_string(sec_websocket_key: &WebSocketKey, output: &mut [u8]) 
     let input = sha1.finalize();
     base64::encode_config_slice(input, base64::STANDARD, output); // no need for slices since the output WILL be 28 bytes
     Ok(())
+}
+
+#[cfg(test)]
+mod capacity_tests {
+    use super::*;
+
+    #[test]
+    fn values_that_do_not_fit_are_refused_or_skipped_instead_of_panicking() {
+        let long = [b'x'; 100];
+        let headers = [
+            ("Upgrade", &b"websocket"[..]),
+            ("Sec-WebSocket-Key", &long[..]),
+        ];
+        assert!(matches!(
+            read_http_header(headers.into_iter()),
+            Err(Error::WriteToBufferTooSmall)
+        ));
+
+        let protocols = [&b"chat, "[..], &long[..]].concat();
+        let headers = [
+            ("Upgrade", &b"websocket"[..]),
+            ("Sec-WebSocket-Protocol", &protocols[..]),
+            ("Sec-WebSocket-Key", &b"dGhlIHNhbXBsZSBub25jZQ=="[..]),
+        ];
+        let context = read_http_header(headers.into_iter()).unwrap().unwrap();
+        assert_eq!(context.sec_websocket_protocol_list.len(), 1);
+        assert_eq!(context.sec_websocket_protocol_list[0], "chat");
+    }
 }

@@ -1,6 +1,6 @@
 use core::ops::Range;
 
-use rand_core::RngCore;
+use rand_core::Rng;
 
 use crate::{
     framer::{FramerError, ReadResult},
@@ -71,7 +71,7 @@ impl FramerState {
 
 pub(crate) struct FramerCore<'a, TRng, TWebSocketType>
 where
-    TRng: RngCore,
+    TRng: Rng,
     TWebSocketType: WebSocketType,
 {
     read_buf: &'a mut [u8],
@@ -85,7 +85,7 @@ where
 
 impl<'a, TRng> FramerCore<'a, TRng, crate::Client>
 where
-    TRng: RngCore,
+    TRng: Rng,
 {
     pub(crate) fn encode_connect<E>(
         &mut self,
@@ -124,7 +124,7 @@ where
 
 impl<'a, TRng> FramerCore<'a, TRng, crate::Server>
 where
-    TRng: RngCore,
+    TRng: Rng,
 {
     pub(crate) fn encode_accept<E>(
         &mut self,
@@ -138,7 +138,7 @@ where
 
 impl<'a, TRng, TWebSocketType> FramerCore<'a, TRng, TWebSocketType>
 where
-    TRng: RngCore,
+    TRng: Rng,
     TWebSocketType: WebSocketType,
 {
     pub(crate) fn new(

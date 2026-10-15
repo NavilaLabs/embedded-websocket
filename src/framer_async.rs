@@ -1,7 +1,7 @@
 use core::{fmt::Debug, ops::Deref, str::Utf8Error};
 
 use futures::{Sink, SinkExt, Stream, StreamExt};
-use rand_core::RngCore;
+use rand_core::Rng;
 
 use crate::{
     WebSocket, WebSocketCloseStatusCode, WebSocketContext, WebSocketOptions,
@@ -42,7 +42,7 @@ pub enum FramerError<E> {
 
 pub struct Framer<TRng, TWebSocketType>
 where
-    TRng: RngCore,
+    TRng: Rng,
     TWebSocketType: WebSocketType,
 {
     websocket: WebSocket<TRng, TWebSocketType>,
@@ -52,7 +52,7 @@ where
 
 impl<TRng> Framer<TRng, crate::Server>
 where
-    TRng: RngCore,
+    TRng: Rng,
 {
     pub async fn accept<'a, B, E>(
         &mut self,
@@ -72,7 +72,7 @@ where
 
 impl<TRng> Framer<TRng, crate::Client>
 where
-    TRng: RngCore,
+    TRng: Rng,
 {
     pub async fn connect<'a, B, E>(
         &mut self,
@@ -129,7 +129,7 @@ where
 
 impl<TRng, TWebSocketType> Framer<TRng, TWebSocketType>
 where
-    TRng: RngCore,
+    TRng: Rng,
     TWebSocketType: WebSocketType,
 {
     pub fn new(websocket: WebSocket<TRng, TWebSocketType>) -> Self {

@@ -1,4 +1,6 @@
-use rand_core::RngCore;
+use core::convert::Infallible;
+
+use rand_core::TryRng;
 
 // Clients need a proper random number generator to generate a mask key
 // However, server websockets do not require this and the payload is not masked
@@ -16,15 +18,16 @@ impl EmptyRng {
     }
 }
 
-impl RngCore for EmptyRng {
-    fn next_u32(&mut self) -> u32 {
-        0
+impl TryRng for EmptyRng {
+    type Error = Infallible;
+
+    fn try_next_u32(&mut self) -> Result<u32, Infallible> {
+        Ok(0)
     }
-    fn next_u64(&mut self) -> u64 {
-        0
+    fn try_next_u64(&mut self) -> Result<u64, Infallible> {
+        Ok(0)
     }
-    fn fill_bytes(&mut self, _dest: &mut [u8]) {}
-    fn try_fill_bytes(&mut self, _dest: &mut [u8]) -> core::result::Result<(), rand_core::Error> {
+    fn try_fill_bytes(&mut self, _dest: &mut [u8]) -> Result<(), Infallible> {
         Ok(())
     }
 }

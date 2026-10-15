@@ -10,7 +10,7 @@
 use core::ops::Range;
 
 use embedded_io_async::{Read, Write};
-use rand_core::RngCore;
+use rand_core::Rng;
 
 pub use crate::framer::{FramerError, ReadResult};
 pub use crate::framer_core::FramerState;
@@ -44,7 +44,7 @@ use crate::{
 ///     let mut state = FramerState::new();
 ///     let mut write_buf = [0; 1024];
 ///     let mut frame_buf = [0; 1024];
-///     let mut websocket = WebSocketClient::new_client(rand::thread_rng());
+///     let mut websocket = WebSocketClient::new_client(rand::rng());
 ///     let mut framer = Framer::new(&mut read_buf, &mut state, &mut write_buf, &mut websocket);
 ///
 ///     let websocket_options = WebSocketOptions {
@@ -66,7 +66,7 @@ use crate::{
 /// ```
 pub struct Framer<'a, TRng, TWebSocketType>
 where
-    TRng: RngCore,
+    TRng: Rng,
     TWebSocketType: WebSocketType,
 {
     core: FramerCore<'a, TRng, TWebSocketType>,
@@ -75,7 +75,7 @@ where
 
 impl<'a, TRng> Framer<'a, TRng, crate::Client>
 where
-    TRng: RngCore,
+    TRng: Rng,
 {
     /// Performs the client side of the opening handshake.
     ///
@@ -121,7 +121,7 @@ where
 
 impl<'a, TRng> Framer<'a, TRng, crate::Server>
 where
-    TRng: RngCore,
+    TRng: Rng,
 {
     /// Performs the server side of the opening handshake.
     ///
@@ -148,7 +148,7 @@ where
 
 impl<'a, TRng, TWebSocketType> Framer<'a, TRng, TWebSocketType>
 where
-    TRng: RngCore,
+    TRng: Rng,
     TWebSocketType: WebSocketType,
 {
     /// Creates a framer.
@@ -370,7 +370,7 @@ mod tests {
         let mut read_buf = vec![0; 1024];
         let mut write_buf = vec![0; 1024];
         let mut state = FramerState::default();
-        let mut ws_client = WebSocketClient::new_client(rand::thread_rng());
+        let mut ws_client = WebSocketClient::new_client(rand::rng());
         ws_client.state = WebSocketState::Open;
         let mut framer = Framer::new(&mut read_buf, &mut state, &mut write_buf, &mut ws_client);
         let mut stream = OneBytePerReadStream {
@@ -440,7 +440,7 @@ mod tests {
     }
 
     fn client_frame(payload: &[u8], op_code: WebSocketOpCode, fin: bool) -> Vec<u8> {
-        let mut ws_client = WebSocketClient::new_client(rand::thread_rng());
+        let mut ws_client = WebSocketClient::new_client(rand::rng());
         let mut frame = vec![0; 256];
         let len = ws_client
             .write_frame(payload, &mut frame, op_code, fin)

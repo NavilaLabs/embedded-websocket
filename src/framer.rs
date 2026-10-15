@@ -11,7 +11,7 @@ use crate::{
     WebSocketSendMessageType, WebSocketState, WebSocketSubProtocol, WebSocketType,
 };
 use core::str::Utf8Error;
-use rand_core::RngCore;
+use rand_core::Rng;
 
 // automagically implement the Stream trait for TcpStream if we are using the standard library
 // if you were using no_std you would have to implement your own stream
@@ -49,7 +49,7 @@ pub enum FramerError<E> {
 
 pub struct Framer<'a, TRng, TWebSocketType>
 where
-    TRng: RngCore,
+    TRng: Rng,
     TWebSocketType: WebSocketType,
 {
     core: FramerCore<'a, TRng, TWebSocketType>,
@@ -57,7 +57,7 @@ where
 
 impl<'a, TRng> Framer<'a, TRng, crate::Client>
 where
-    TRng: RngCore,
+    TRng: Rng,
 {
     pub fn connect<E>(
         &mut self,
@@ -70,7 +70,7 @@ where
 
 impl<'a, TRng> Framer<'a, TRng, crate::Server>
 where
-    TRng: RngCore,
+    TRng: Rng,
 {
     pub fn accept<E>(
         &mut self,
@@ -87,7 +87,7 @@ where
 
 impl<'a, TRng, TWebSocketType> Framer<'a, TRng, TWebSocketType>
 where
-    TRng: RngCore,
+    TRng: Rng,
     TWebSocketType: WebSocketType,
 {
     // read and write buffers are usually quite small (4KB) and can be smaller
@@ -149,7 +149,7 @@ where
     }
 }
 
-pub(crate) fn connect<TRng: RngCore, E>(
+pub(crate) fn connect<TRng: Rng, E>(
     core: &mut FramerCore<'_, TRng, crate::Client>,
     stream: &mut impl Stream<E>,
     websocket_options: &WebSocketOptions,
@@ -175,7 +175,7 @@ pub(crate) fn connect<TRng: RngCore, E>(
     }
 }
 
-pub(crate) fn read<'b, TRng: RngCore, TWebSocketType: WebSocketType, E>(
+pub(crate) fn read<'b, TRng: Rng, TWebSocketType: WebSocketType, E>(
     core: &mut FramerCore<'_, TRng, TWebSocketType>,
     stream: &mut impl Stream<E>,
     frame_buf: &'b mut [u8],
@@ -263,7 +263,7 @@ mod tests {
         let mut read_buf = vec![0; 1024];
         let mut write_buf = vec![0; 1024];
         let mut read_cursor = 0;
-        let mut ws_client = WebSocketClient::new_client(rand::thread_rng());
+        let mut ws_client = WebSocketClient::new_client(rand::rng());
         ws_client.state = WebSocketState::Open;
         let mut client_framer = Framer::new(
             &mut read_buf,
@@ -291,7 +291,7 @@ mod tests {
         let mut read_buf = vec![0; 1024];
         let mut write_buf = vec![0; 1024];
         let mut read_cursor = 0;
-        let mut ws_client = WebSocketClient::new_client(rand::thread_rng());
+        let mut ws_client = WebSocketClient::new_client(rand::rng());
         ws_client.state = WebSocketState::Open;
         let mut client_framer = Framer::new(
             &mut read_buf,
@@ -319,7 +319,7 @@ mod tests {
         let mut read_buf = vec![0; 1024];
         let mut write_buf = vec![0; 1024];
         let mut read_cursor = 0;
-        let mut ws_client = WebSocketClient::new_client(rand::thread_rng());
+        let mut ws_client = WebSocketClient::new_client(rand::rng());
         ws_client.state = WebSocketState::Open;
         let mut client_framer = Framer::new(
             &mut read_buf,
@@ -348,7 +348,7 @@ mod tests {
         let mut read_buf = vec![0; 1024];
         let mut write_buf = vec![0; 1024];
         let mut read_cursor = 0;
-        let mut ws_client = WebSocketClient::new_client(rand::thread_rng());
+        let mut ws_client = WebSocketClient::new_client(rand::rng());
         ws_client.state = WebSocketState::Open;
         let mut client_framer = Framer::new(
             &mut read_buf,
@@ -424,7 +424,7 @@ mod tests {
         let mut read_buf = vec![0; 1024];
         let mut write_buf = vec![0; 1024];
         let mut read_cursor = 0;
-        let mut ws_client = WebSocketClient::new_client(rand::thread_rng());
+        let mut ws_client = WebSocketClient::new_client(rand::rng());
         let mut client_framer = Framer::new(
             &mut read_buf,
             &mut read_cursor,
