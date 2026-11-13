@@ -839,19 +839,18 @@ where
         const SHORT_HEADER_SIZE: usize = 4;
         const LONG_HEADER_SIZE: usize = 10;
         const MASK_KEY_SIZE: usize = 4;
-        let header_size;
         let mask_bit_set_as_byte = if self.is_client { 0x80 } else { 0x00 };
         let payload_len = from_buffer.len() + if self.is_client { MASK_KEY_SIZE } else { 0 };
 
         // write header followed by the payload
         // header size depends on how large the payload is
-        if count < 126 {
+        let header_size = if count < 126 {
             if payload_len + BYTE_HEADER_SIZE > to_buffer.len() {
                 return Err(Error::WriteToBufferTooSmall);
             }
             to_buffer[0] = byte1;
             to_buffer[1] = mask_bit_set_as_byte | count as u8;
-            header_size = BYTE_HEADER_SIZE;
+            BYTE_HEADER_SIZE
         } else if count <= u16::MAX as usize {
             if payload_len + SHORT_HEADER_SIZE > to_buffer.len() {
                 return Err(Error::WriteToBufferTooSmall);
@@ -859,7 +858,7 @@ where
             to_buffer[0] = byte1;
             to_buffer[1] = mask_bit_set_as_byte | 126;
             to_buffer[2..4].copy_from_slice(&(count as u16).to_be_bytes());
-            header_size = SHORT_HEADER_SIZE;
+            SHORT_HEADER_SIZE
         } else {
             if payload_len + LONG_HEADER_SIZE > to_buffer.len() {
                 return Err(Error::WriteToBufferTooSmall);
@@ -867,8 +866,8 @@ where
             to_buffer[0] = byte1;
             to_buffer[1] = mask_bit_set_as_byte | 127;
             to_buffer[2..10].copy_from_slice(&(count as u64).to_be_bytes());
-            header_size = LONG_HEADER_SIZE;
-        }
+            LONG_HEADER_SIZE
+        };
 
         // sent by client - need to mask the data
         // we need to mask the bytes to prevent web server caching
