@@ -1,4 +1,5 @@
 use super::*;
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use heapless::{String, Vec};
 
 // NOTE: this struct is re-exported
@@ -121,7 +122,9 @@ pub fn build_connect_handshake_request(
 
     let mut key: [u8; 16] = [0; 16];
     rng.fill_bytes(&mut key);
-    base64::encode_config_slice(key, base64::STANDARD, &mut key_as_base64);
+    BASE64
+        .encode_slice(key, &mut key_as_base64)
+        .expect("24 bytes fit the base64 encoding of 16 bytes");
     let sec_websocket_key: String<24> = String::try_from(str::from_utf8(&key_as_base64)?)?;
 
     http_request.push_str("GET ")?;
@@ -188,7 +191,7 @@ pub fn build_connect_handshake_response(
     Ok(http_response.len())
 }
 
-pub fn build_accept_string(sec_websocket_key: &WebSocketKey, output: &mut [u8]) -> Result<()> {
+pub fn build_accept_string(sec_websocket_key: &WebSocketKey, output: &mut [u8; 28]) -> Result<()> {
     // concatenate the key with a known websocket GUID (as per the spec)
     let mut accept_string: String<64> = String::new();
     accept_string.push_str(sec_websocket_key)?;
@@ -198,7 +201,9 @@ pub fn build_accept_string(sec_websocket_key: &WebSocketKey, output: &mut [u8]) 
     let mut sha1 = Sha1::new();
     sha1.update(&accept_string);
     let input = sha1.finalize();
-    base64::encode_config_slice(input, base64::STANDARD, output); // no need for slices since the output WILL be 28 bytes
+    BASE64
+        .encode_slice(input, output)
+        .expect("28 bytes fit the base64 encoding of a 20 byte SHA-1 hash");
     Ok(())
 }
 

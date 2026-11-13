@@ -13,7 +13,6 @@
 #![cfg_attr(not(feature = "std"), no_std)]
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
-use byteorder::{BigEndian, ByteOrder};
 use core::{cmp, result, str};
 use heapless::{String, Vec};
 use rand_core::Rng;
@@ -735,8 +734,7 @@ where
                 from_buffer.extend_from_slice(&status_description.as_bytes()[..len])?;
                 self.write_frame(&from_buffer, to, WebSocketOpCode::ConnectionClose, true)
             } else {
-                let mut from_buffer: [u8; 2] = [0; 2];
-                BigEndian::write_u16(&mut from_buffer, close_status.to_u16());
+                let from_buffer = close_status.to_u16().to_be_bytes();
                 self.write_frame(&from_buffer, to, WebSocketOpCode::ConnectionClose, true)
             }
         } else {
@@ -854,7 +852,7 @@ where
             }
             to_buffer[0] = byte1;
             to_buffer[1] = mask_bit_set_as_byte | 126;
-            BigEndian::write_u16(&mut to_buffer[2..], count as u16);
+            to_buffer[2..4].copy_from_slice(&(count as u16).to_be_bytes());
             header_size = SHORT_HEADER_SIZE;
         } else {
             if payload_len + LONG_HEADER_SIZE > to_buffer.len() {
@@ -862,7 +860,7 @@ where
             }
             to_buffer[0] = byte1;
             to_buffer[1] = mask_bit_set_as_byte | 127;
-            BigEndian::write_u64(&mut to_buffer[2..], count as u64);
+            to_buffer[2..10].copy_from_slice(&(count as u64).to_be_bytes());
             header_size = LONG_HEADER_SIZE;
         }
 
@@ -1089,7 +1087,7 @@ fn read_length(byte2: u8, from_buffer: &[u8]) -> Result<(usize, usize)> {
         }
         let mut buf: [u8; 2] = [0; 2];
         buf.copy_from_slice(&from_buffer[..2]);
-        return Ok((BigEndian::read_u16(&buf) as usize, 2));
+        return Ok((u16::from_be_bytes(buf) as usize, 2));
     } else if len == 127 {
         // for messages larger than 64KB
         if from_buffer.len() < 8 {
@@ -1097,7 +1095,7 @@ fn read_length(byte2: u8, from_buffer: &[u8]) -> Result<(usize, usize)> {
         }
         let mut buf: [u8; 8] = [0; 8];
         buf.copy_from_slice(&from_buffer[..8]);
-        return Ok((BigEndian::read_u64(&buf) as usize, 8));
+        return Ok((u64::from_be_bytes(buf) as usize, 8));
     }
 
     Err(Error::InvalidFrameLength)
@@ -1106,7 +1104,7 @@ fn read_length(byte2: u8, from_buffer: &[u8]) -> Result<(usize, usize)> {
 fn decode_close_frame(buffer: &mut [u8], num_bytes_read: usize, len: usize) -> WebSocketFrame {
     if len >= 2 {
         // NOTE: for now, don't read the close status description
-        let code = BigEndian::read_u16(buffer);
+        let code = u16::from_be_bytes([buffer[0], buffer[1]]);
         let close_status_code = WebSocketCloseStatusCode::from_u16(code);
 
         return WebSocketFrame {
