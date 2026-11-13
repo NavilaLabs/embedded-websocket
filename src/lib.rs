@@ -98,6 +98,7 @@ pub type WebSocketSubProtocol = String<24>;
 
 /// Websocket send message type used when sending a websocket frame
 #[derive(PartialEq, Eq, Debug, Copy, Clone)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub enum WebSocketSendMessageType {
     /// A UTF8 encoded text string
     Text = 1,
@@ -126,6 +127,7 @@ impl WebSocketSendMessageType {
 
 /// Websocket receive message type use when reading a websocket frame
 #[derive(PartialEq, Eq, Debug, Copy, Clone)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub enum WebSocketReceiveMessageType {
     /// A UTF8 encoded text string
     Text = 1,
@@ -146,6 +148,7 @@ pub enum WebSocketReceiveMessageType {
 
 /// Websocket close status code as per the rfc6455 websocket spec
 #[derive(PartialEq, Eq, Debug, Copy, Clone)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub enum WebSocketCloseStatusCode {
     /// Normal closure (1000), meaning that the purpose for which the connection was established
     /// has been fulfilled
@@ -228,6 +231,7 @@ impl WebSocketCloseStatusCode {
 
 /// The state of the websocket
 #[derive(PartialEq, Eq, Copy, Clone, Debug)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub enum WebSocketState {
     /// The websocket has been created with `new_client()` or `new_server()`
     None = 0,
@@ -249,6 +253,7 @@ pub enum WebSocketState {
 
 /// Websocket specific errors
 #[derive(PartialEq, Eq, Debug, Clone)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub enum Error {
     /// Websocket frame has an invalid opcode
     InvalidOpCode,
@@ -357,6 +362,7 @@ impl WebSocketOpCode {
 
 /// The metadata result of a `read` function call of a websocket
 #[derive(Debug)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub struct WebSocketReadResult {
     /// Number of bytes read from the `from` buffer
     pub len_from: usize,

@@ -15,7 +15,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        features: ["", "asynch", "std", "std,asynch"]
+        features: ["", "asynch", "std", "std,asynch", "asynch,defmt"]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.100.0
@@ -29,7 +29,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.87.0
-      - run: cargo build --lib --features std,asynch
+      - run: cargo build --lib --features std,asynch,defmt
 
   no-std:
     runs-on: ubuntu-latest
@@ -38,7 +38,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.100.0
         with:
           targets: thumbv7em-none-eabihf
-      - run: cargo build --target thumbv7em-none-eabihf --features asynch
+      - run: cargo build --target thumbv7em-none-eabihf --features asynch,defmt
 
   format-and-docs:
     runs-on: ubuntu-latest

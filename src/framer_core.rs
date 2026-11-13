@@ -11,6 +11,7 @@ use crate::{
 };
 
 /// A whole websocket message read from the stream.
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub enum ReadResult<'a> {
     /// A binary message.
     Binary(&'a [u8]),
@@ -34,6 +35,7 @@ pub enum ReadResult<'a> {
 ///
 /// Text and binary messages arrive as one or more chunks of the same type; the last one has
 /// `is_last` set. Pong, close and disconnect events arrive whole, as in [`ReadResult`].
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub enum ReadChunk<'a> {
     /// A chunk of a binary message.
     Binary {
@@ -83,6 +85,7 @@ impl<'a> From<ReadResult<'a>> for ReadChunk<'a> {
 
 /// An error of a framer operation.
 #[derive(Debug)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub enum FramerError<E> {
     /// Reading from or writing to the stream failed.
     Io(E),

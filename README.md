@@ -13,6 +13,7 @@ embedded-io-websocket = { version = "x.x.x", features = ["asynch"] }
 
 * `asynch`: the async framer for [embedded-io-async](https://crates.io/crates/embedded-io-async) streams.
 * `std`: implements `std::error::Error` for the error types. Without it the crate is `no_std`.
+* `defmt`: implements `defmt::Format` for the errors, read results, close status codes and message types, so firmware can log them with [defmt](https://crates.io/crates/defmt).
 
 The minimum supported Rust version is 1.87.
 
