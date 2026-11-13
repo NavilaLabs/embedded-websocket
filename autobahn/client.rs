@@ -89,7 +89,7 @@ impl Buffers {
                 Ok(ReadResult::Text(text)) => (WebSocketSendMessageType::Text, text.as_bytes()),
                 Ok(ReadResult::Binary(binary)) => (WebSocketSendMessageType::Binary, binary),
                 Ok(ReadResult::Pong(_)) => continue,
-                Ok(ReadResult::Closed) => return Ok(()),
+                Ok(ReadResult::Closed { .. } | ReadResult::Disconnected) => return Ok(()),
                 Err(error) => return Err(error),
             };
             if on_message(message_type, payload) {

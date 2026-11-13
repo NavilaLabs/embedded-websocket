@@ -278,8 +278,8 @@ where
     /// Reads from the stream until a whole message arrived.
     ///
     /// Answers ping messages with a pong message and completes a close handshake the other party
-    /// initiated. Returns [`ReadResult::Closed`] when the close handshake is complete or the
-    /// stream ended.
+    /// initiated. Returns [`ReadResult::Closed`] when the close handshake is complete and
+    /// [`ReadResult::Disconnected`] when the stream ended before.
     ///
     /// Pass the same `frame_buf` to every call: a call that fails may leave the first frames of
     /// a message in it.
@@ -311,16 +311,16 @@ where
                         .read(self.core.read_space()?)
                         .map_err(FramerError::Io)?;
                     if len == 0 {
-                        return Ok(ReadResult::Closed);
+                        return Ok(ReadResult::Disconnected);
                     }
                     self.core.commit_read(len);
                 }
                 Decoded::SendThenContinue(len) => {
                     self.send(stream, len)?;
                 }
-                Decoded::SendThenClosed(len) => {
+                Decoded::SendThenReturn(len, message) => {
                     self.send(stream, len)?;
-                    return Ok(ReadResult::Closed);
+                    return message.into_read_result(frame_buf);
                 }
                 Decoded::SendThenFail(len, error) => {
                     self.send(stream, len)?;
@@ -456,7 +456,7 @@ mod tests {
         }
         assert!(matches!(
             framer.read(&mut stream, &mut frame_buf).unwrap(),
-            ReadResult::Closed
+            ReadResult::Disconnected
         ));
         stream
     }
@@ -718,6 +718,63 @@ mod tests {
             Err(FramerError::WebSocket(crate::Error::HttpHeaderInvalid))
         ));
         assert!(written.starts_with("HTTP/1.1 400 Bad Request\r\n"));
+    }
+
+    fn close_payload(status: u16, reason: &str) -> Vec<u8> {
+        [&status.to_be_bytes()[..], reason.as_bytes()].concat()
+    }
+
+    #[test]
+    fn close_from_the_other_party_returns_its_status_and_reason() {
+        let mut read_buf = vec![0; 1024];
+        let mut write_buf = vec![0; 1024];
+        let mut frame_buf = vec![0; 1024];
+        let mut state = FramerState::new();
+        let mut ws_server = WebSocketServer::new_server();
+        ws_server.state = WebSocketState::Open;
+        let mut stream = ScriptedStream::new();
+        stream.chunks.push_back(client_frame(
+            &close_payload(4000, "bye"),
+            WebSocketOpCode::ConnectionClose,
+            true,
+        ));
+        let mut framer = Framer::new(&mut read_buf, &mut state, &mut write_buf, &mut ws_server);
+        assert!(matches!(
+            framer.read(&mut stream, &mut frame_buf).unwrap(),
+            ReadResult::Closed {
+                status: WebSocketCloseStatusCode::Custom(4000),
+                reason: "bye"
+            }
+        ));
+        assert_eq!(
+            stream.written,
+            [&[0x88, 0x05][..], &close_payload(4000, "bye")].concat()
+        );
+    }
+
+    #[test]
+    fn close_reply_returns_the_status_of_the_other_party() {
+        let mut read_buf = vec![0; 1024];
+        let mut write_buf = vec![0; 1024];
+        let mut frame_buf = vec![0; 1024];
+        let mut state = FramerState::new();
+        let mut ws_server = WebSocketServer::new_server();
+        ws_server.state = WebSocketState::Open;
+        let mut stream = ScriptedStream::new();
+        let mut framer = Framer::new(&mut read_buf, &mut state, &mut write_buf, &mut ws_server);
+        framer
+            .close(&mut stream, WebSocketCloseStatusCode::NormalClosure, None)
+            .unwrap();
+        stream
+            .chunks
+            .push_back(client_frame(b"", WebSocketOpCode::ConnectionClose, true));
+        assert!(matches!(
+            framer.read(&mut stream, &mut frame_buf).unwrap(),
+            ReadResult::Closed {
+                status: WebSocketCloseStatusCode::Empty,
+                reason: ""
+            }
+        ));
     }
 
     #[test]

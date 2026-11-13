@@ -43,7 +43,7 @@ fn echo(stream: TcpStream) -> Result<(), FramerError<std::io::Error>> {
             Ok(ReadResult::Text(text)) => (WebSocketSendMessageType::Text, text.as_bytes()),
             Ok(ReadResult::Binary(binary)) => (WebSocketSendMessageType::Binary, binary),
             Ok(ReadResult::Pong(_)) => continue,
-            Ok(ReadResult::Closed) => return Ok(()),
+            Ok(ReadResult::Closed { .. } | ReadResult::Disconnected) => return Ok(()),
             Err(error) => return Err(error),
         };
         framer.write(&mut stream, message_type, true, payload)?;

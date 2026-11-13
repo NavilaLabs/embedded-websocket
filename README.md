@@ -72,11 +72,17 @@ let mut framer = Framer::new(&mut read_buf, &mut state, &mut write_buf, &mut web
 framer.connect(&mut stream, &websocket_options)?;
 framer.write(&mut stream, WebSocketSendMessageType::Text, true, b"Hello, World!")?;
 
-while let ReadResult::Text(text) = framer.read(&mut stream, &mut frame_buf)? {
-    println!("Received: {}", text);
-
-    // close the websocket after receiving the first reply
-    framer.close(&mut stream, WebSocketCloseStatusCode::NormalClosure, None)?;
+loop {
+    match framer.read(&mut stream, &mut frame_buf)? {
+        ReadResult::Text(text) => {
+            println!("Received: {}", text);
+            // close the websocket after receiving the first reply
+            framer.close(&mut stream, WebSocketCloseStatusCode::NormalClosure, None)?;
+        }
+        ReadResult::Closed { status, reason } => break println!("Closed: {status:?} {reason}"),
+        ReadResult::Disconnected => break println!("Dropped before the close handshake"),
+        ReadResult::Binary(_) | ReadResult::Pong(_) => {}
+    }
 }
 ```
 

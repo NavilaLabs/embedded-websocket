@@ -286,8 +286,8 @@ where
     /// Reads from the stream until a whole message arrived.
     ///
     /// Answers ping messages with a pong message and completes a close handshake the other party
-    /// initiated. Returns [`ReadResult::Closed`] when the close handshake is complete or the
-    /// stream ended.
+    /// initiated. Returns [`ReadResult::Closed`] when the close handshake is complete and
+    /// [`ReadResult::Disconnected`] when the stream ended before.
     ///
     /// Pass the same `frame_buf` to every call: a call that is cancelled may leave the first
     /// frames of a message in it.
@@ -320,16 +320,16 @@ where
                         .await
                         .map_err(FramerError::Io)?;
                     if len == 0 {
-                        return Ok(ReadResult::Closed);
+                        return Ok(ReadResult::Disconnected);
                     }
                     self.core.commit_read(len);
                 }
                 Decoded::SendThenContinue(len) => {
                     self.send(stream, len).await?;
                 }
-                Decoded::SendThenClosed(len) => {
+                Decoded::SendThenReturn(len, message) => {
                     self.send(stream, len).await?;
-                    return Ok(ReadResult::Closed);
+                    return message.into_read_result(frame_buf);
                 }
                 Decoded::SendThenFail(len, error) => {
                     self.send(stream, len).await?;
@@ -451,7 +451,7 @@ mod tests {
 
         assert!(matches!(
             framer.read(&mut stream, &mut frame_buf).await.unwrap(),
-            ReadResult::Closed
+            ReadResult::Disconnected
         ));
     }
 

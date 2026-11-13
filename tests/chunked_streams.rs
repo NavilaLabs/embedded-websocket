@@ -246,7 +246,8 @@ fn received(result: ReadResult<'_>) -> Option<Message> {
         ReadResult::Text(text) => Some(Message::Text(text.to_owned())),
         ReadResult::Binary(binary) => Some(Message::Binary(binary.to_vec())),
         ReadResult::Pong(_) => panic!("the client sends no pongs"),
-        ReadResult::Closed => None,
+        ReadResult::Closed { .. } => panic!("the client sends no close frame"),
+        ReadResult::Disconnected => None,
     }
 }
 

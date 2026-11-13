@@ -18,8 +18,16 @@ pub enum ReadResult<'a> {
     Text(&'a str),
     /// A pong message with its payload.
     Pong(&'a [u8]),
-    /// The close handshake is complete or the stream ended.
-    Closed,
+    /// The close handshake is complete. Holds the status code and reason the other party sent,
+    /// or [`WebSocketCloseStatusCode::Empty`] and an empty reason if it sent none.
+    Closed {
+        /// The status code of the other party.
+        status: WebSocketCloseStatusCode,
+        /// The reason the other party gave.
+        reason: &'a str,
+    },
+    /// The stream ended before the close handshake was complete.
+    Disconnected,
 }
 
 /// An error of a framer operation.
@@ -44,7 +52,7 @@ pub(crate) enum Answer<'a> {
 pub(crate) enum Decoded<E> {
     NeedMoreData,
     SendThenContinue(usize),
-    SendThenClosed(usize),
+    SendThenReturn(usize, Message),
     SendThenFail(usize, FramerError<E>),
     Message(Message),
 }
@@ -53,7 +61,7 @@ pub(crate) enum Message {
     Binary(usize),
     Text(usize),
     Pong(Range<usize>),
-    Closed,
+    Closed(Range<usize>),
 }
 
 impl Message {
@@ -67,7 +75,16 @@ impl Message {
                 core::str::from_utf8(&frame_buf[..len]).map_err(FramerError::Utf8)?,
             ),
             Message::Pong(range) => ReadResult::Pong(&frame_buf[range]),
-            Message::Closed => ReadResult::Closed,
+            Message::Closed(range) => match &frame_buf[range] {
+                [high, low, reason @ ..] => ReadResult::Closed {
+                    status: WebSocketCloseStatusCode::from_u16(u16::from_be_bytes([*high, *low])),
+                    reason: core::str::from_utf8(reason).map_err(FramerError::Utf8)?,
+                },
+                _ => ReadResult::Closed {
+                    status: WebSocketCloseStatusCode::Empty,
+                    reason: "",
+                },
+            },
         })
     }
 }
@@ -358,12 +375,12 @@ where
                     let len = self.encode_write(
                         WebSocketSendMessageType::CloseReply,
                         true,
-                        &frame_buf[payload],
+                        &frame_buf[payload.clone()],
                     )?;
-                    return Ok(Decoded::SendThenClosed(len));
+                    return Ok(Decoded::SendThenReturn(len, Message::Closed(payload)));
                 }
                 WebSocketReceiveMessageType::CloseCompleted => {
-                    return Ok(Decoded::Message(Message::Closed));
+                    return Ok(Decoded::Message(Message::Closed(payload)));
                 }
                 WebSocketReceiveMessageType::Ping => {
                     self.state.control_frames = self.state.control_frames.saturating_add(1);

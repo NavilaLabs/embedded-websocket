@@ -49,20 +49,31 @@ async fn main() -> Result<(), FramerError<impl Error>> {
         )
         .await?;
 
-    while let ReadResult::Text(s) = framer.read(&mut stream, &mut frame_buf).await? {
-        println!("Received: {}", s);
+    loop {
+        match framer.read(&mut stream, &mut frame_buf).await? {
+            ReadResult::Text(text) => {
+                println!("Received: {}", text);
 
-        // close the websocket after receiving the first reply
-        framer
-            .close(
-                &mut stream,
-                WebSocketCloseStatusCode::NormalClosure,
-                Some("Done chatting"),
-            )
-            .await?;
-        println!("Sent close handshake");
+                // close the websocket after receiving the first reply
+                framer
+                    .close(
+                        &mut stream,
+                        WebSocketCloseStatusCode::NormalClosure,
+                        Some("Done chatting"),
+                    )
+                    .await?;
+                println!("Sent close handshake");
+            }
+            ReadResult::Closed { status, reason } => {
+                println!("Connection closed: {status:?} {reason:?}");
+                break;
+            }
+            ReadResult::Disconnected => {
+                println!("Connection dropped before the close handshake");
+                break;
+            }
+            ReadResult::Binary(_) | ReadResult::Pong(_) => {}
+        }
     }
-
-    println!("Connection closed");
     Ok(())
 }
