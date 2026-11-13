@@ -77,7 +77,9 @@ pub mod blocking;
 mod framer_core;
 mod head;
 mod request;
-pub use self::framer_core::{FramerError, FramerState, ReadResult};
+pub use self::framer_core::{
+    FramerError, FramerState, ReadResult, MIN_FRAME_BUF_LEN, MIN_READ_BUF_LEN, MIN_WRITE_BUF_LEN,
+};
 pub use self::request::{Decision, Request};
 
 const MASK_KEY_LEN: usize = 4;

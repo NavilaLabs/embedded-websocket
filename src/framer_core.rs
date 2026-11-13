@@ -7,7 +7,7 @@ use crate::{
     request::{Decision, Request},
     WebSocket, WebSocketCloseStatusCode, WebSocketKey, WebSocketOptions,
     WebSocketReceiveMessageType, WebSocketSendMessageType, WebSocketState, WebSocketSubProtocol,
-    WebSocketType, MASK_KEY_LEN,
+    WebSocketType, MASK_KEY_LEN, MAX_CONTROL_FRAME_PAYLOAD_LEN,
 };
 
 /// A whole websocket message read from the stream.
@@ -114,6 +114,26 @@ impl Message {
         })
     }
 }
+
+/// The smallest read buffer a framer can work with: it fits the largest control frame, which is
+/// masked and carries 125 bytes of payload.
+///
+/// The read buffer must also fit the HTTP header the other side sends in the opening handshake,
+/// whose size the other side decides.
+pub const MIN_READ_BUF_LEN: usize = 2 + MASK_KEY_LEN + MAX_CONTROL_FRAME_PAYLOAD_LEN;
+
+/// The smallest frame buffer a framer can work with: it fits the largest control frame payload.
+///
+/// The frame buffer must also fit the largest text or binary message you accept.
+pub const MIN_FRAME_BUF_LEN: usize = MAX_CONTROL_FRAME_PAYLOAD_LEN;
+
+/// The smallest write buffer a framer can work with: it fits the largest control frame and the
+/// largest response of a server to the opening handshake, which names a sub protocol of
+/// [`WebSocketSubProtocol`]'s full capacity.
+///
+/// A client's write buffer must also fit its own request of the opening handshake, which grows with
+/// the path, host, origin, sub protocols and additional headers of its [`WebSocketOptions`].
+pub const MIN_WRITE_BUF_LEN: usize = 179;
 
 /// Progress of a connection that outlives a single framer call.
 ///

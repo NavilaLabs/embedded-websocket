@@ -40,7 +40,7 @@ A framer works on three buffers you provide, and a `FramerState` that you keep p
 * `frame_buf` receives a whole message, so it must fit the largest message you accept, and at least 125 bytes for control frame payloads. Larger messages fail the connection with status 1009.
 * `write_buf` holds what the framer sends. It must fit the HTTP header of your side of the opening handshake (about 130 bytes for a server, 150 bytes plus path, host, origin and extra headers for a client) and a whole control frame (up to 131 bytes), because the framer answers pings by itself. Text and binary messages larger than it are sent in several frames.
 
-Buffer sizes are not checked up front: a buffer that is too small fails the operation that needs the space. 1 KiB each is a safe start.
+`MIN_READ_BUF_LEN`, `MIN_FRAME_BUF_LEN` and `MIN_WRITE_BUF_LEN` hold the minimum for everything except the HTTP headers above, for example to check buffer sizes at compile time. Buffer sizes are not checked when a framer is created: a buffer that is too small fails the operation that needs the space. 1 KiB each is a safe start.
 
 ### Without a framer
 
