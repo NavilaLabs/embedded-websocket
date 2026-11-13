@@ -34,10 +34,11 @@ pub enum FramerError<E> {
     WebSocket(crate::Error),
 }
 
-pub(crate) enum Decoded {
+pub(crate) enum Decoded<E> {
     NeedMoreData,
     SendThenContinue(usize),
     SendThenClosed(usize),
+    SendThenFail(usize, FramerError<E>),
     Message(Message),
 }
 
@@ -248,7 +249,35 @@ where
         *self.read_len += len;
     }
 
-    pub(crate) fn decode<E>(&mut self, frame_buf: &mut [u8]) -> Result<Decoded, FramerError<E>> {
+    pub(crate) fn decode<E>(&mut self, frame_buf: &mut [u8]) -> Result<Decoded<E>, FramerError<E>> {
+        let error = match self.decode_frames(frame_buf) {
+            Err(error) => error,
+            decoded => return decoded,
+        };
+        let close_status = match &error {
+            FramerError::Utf8(_) | FramerError::WebSocket(crate::Error::Utf8Error) => {
+                WebSocketCloseStatusCode::InvalidPayloadData
+            }
+            FramerError::FrameTooLarge(_) => WebSocketCloseStatusCode::MessageTooBig,
+            FramerError::WebSocket(
+                crate::Error::InvalidOpCode
+                | crate::Error::InvalidFrameLength
+                | crate::Error::InvalidCloseStatusCode
+                | crate::Error::UnexpectedContinuationFrame
+                | crate::Error::ReservedBitsSet
+                | crate::Error::FragmentedControlFrame
+                | crate::Error::UnexpectedDataFrame,
+            ) => WebSocketCloseStatusCode::ProtocolError,
+            _ => return Err(error),
+        };
+        if self.websocket.state != WebSocketState::Open {
+            return Err(error);
+        }
+        let len = self.encode_close(close_status, None)?;
+        Ok(Decoded::SendThenFail(len, error))
+    }
+
+    fn decode_frames<E>(&mut self, frame_buf: &mut [u8]) -> Result<Decoded<E>, FramerError<E>> {
         loop {
             let buffered = &self.read_buf[..*self.read_len];
             if buffered.is_empty() {
@@ -303,6 +332,8 @@ where
                             if ws_result.message_type == WebSocketReceiveMessageType::Binary {
                                 Message::Binary(payload.end)
                             } else {
+                                core::str::from_utf8(&frame_buf[..payload.end])
+                                    .map_err(FramerError::Utf8)?;
                                 Message::Text(payload.end)
                             },
                         ));
@@ -336,7 +367,7 @@ where
         }
     }
 
-    fn need_more_data<E>(&self) -> Result<Decoded, FramerError<E>> {
+    fn need_more_data<E>(&self) -> Result<Decoded<E>, FramerError<E>> {
         if *self.read_len == self.read_buf.len() {
             Err(FramerError::FrameTooLarge(self.read_buf.len()))
         } else {

@@ -267,6 +267,10 @@ where
     ///   header or control frame does not fit into the read buffer.
     /// * [`FramerError::Utf8`] if a text message is not valid UTF-8.
     /// * [`FramerError::WebSocket`] if the other party violates the websocket protocol.
+    ///
+    /// If the other party sent an invalid frame, an invalid text message or a message that does
+    /// not fit, the framer starts a close handshake with the matching status code (1002, 1007 or
+    /// 1009) before it returns the error. Drop the connection afterwards.
     pub async fn read<'b, S>(
         &mut self,
         stream: &mut S,
@@ -294,6 +298,10 @@ where
                 Decoded::SendThenClosed(len) => {
                     self.send(stream, len).await?;
                     return Ok(ReadResult::Closed);
+                }
+                Decoded::SendThenFail(len, error) => {
+                    self.send(stream, len).await?;
+                    return Err(error);
                 }
                 Decoded::Message(message) => return message.into_read_result(frame_buf),
             }

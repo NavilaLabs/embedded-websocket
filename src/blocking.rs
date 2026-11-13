@@ -263,6 +263,10 @@ where
     ///   header or control frame does not fit into the read buffer.
     /// * [`FramerError::Utf8`] if a text message is not valid UTF-8.
     /// * [`FramerError::WebSocket`] if the other party violates the websocket protocol.
+    ///
+    /// If the other party sent an invalid frame, an invalid text message or a message that does
+    /// not fit, the framer starts a close handshake with the matching status code (1002, 1007 or
+    /// 1009) before it returns the error. Drop the connection afterwards.
     pub fn read<'b, S>(
         &mut self,
         stream: &mut S,
@@ -289,6 +293,10 @@ where
                 Decoded::SendThenClosed(len) => {
                     self.send(stream, len)?;
                     return Ok(ReadResult::Closed);
+                }
+                Decoded::SendThenFail(len, error) => {
+                    self.send(stream, len)?;
+                    return Err(error);
                 }
                 Decoded::Message(message) => return message.into_read_result(frame_buf),
             }
@@ -616,6 +624,40 @@ mod tests {
             accept_with("mqtt"),
             Err(FramerError::WebSocket(crate::Error::SubProtocolNotOffered))
         ));
+    }
+
+    fn server_reads(frame: Vec<u8>) -> (FramerError<Interrupted>, Vec<u8>) {
+        let mut read_buf = vec![0; 1024];
+        let mut write_buf = vec![0; 1024];
+        let mut frame_buf = vec![0; 1024];
+        let mut state = FramerState::new();
+        let mut ws_server = WebSocketServer::new_server();
+        ws_server.state = WebSocketState::Open;
+        let mut stream = ScriptedStream::new();
+        stream.chunks.push_back(frame);
+        let mut framer = Framer::new(&mut read_buf, &mut state, &mut write_buf, &mut ws_server);
+        let error = framer.read(&mut stream, &mut frame_buf).err().unwrap();
+        (error, stream.written)
+    }
+
+    #[test]
+    fn protocol_violation_closes_with_protocol_error() {
+        let mut frame = client_frame(b"a", WebSocketOpCode::TextFrame, true);
+        frame[0] |= 0x40;
+        let (error, written) = server_reads(frame);
+        assert!(matches!(
+            error,
+            FramerError::WebSocket(crate::Error::ReservedBitsSet)
+        ));
+        assert_eq!(written, [0x88, 0x02, 0x03, 0xEA]);
+    }
+
+    #[test]
+    fn invalid_text_closes_with_invalid_payload_data() {
+        let (error, written) =
+            server_reads(client_frame(&[0xFF], WebSocketOpCode::TextFrame, true));
+        assert!(matches!(error, FramerError::Utf8(_)));
+        assert_eq!(written, [0x88, 0x02, 0x03, 0xEF]);
     }
 
     #[test]

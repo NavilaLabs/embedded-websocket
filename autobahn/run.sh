@@ -12,24 +12,31 @@ cargo build --release --example autobahn_server --example autobahn_client
 rm -rf "$reports"
 mkdir -p "$reports"
 
+container=autobahn-embedded-io-websocket
+server_pid=
+
+cleanup() {
+    docker stop "$container" >/dev/null 2>&1 || true
+    if [ -n "$server_pid" ]; then kill "$server_pid" 2>/dev/null || true; fi
+}
+trap cleanup EXIT
+
 wstest() {
-    docker run --rm --network host --user "$(id -u):$(id -g)" \
+    docker run --rm --name "$container" --network host --user "$(id -u):$(id -g)" \
         -v "$PWD/autobahn:/config:ro" -v "$PWD/$reports:/reports" \
         "$image" wstest "$@"
 }
 
 target/release/examples/autobahn_server &
 server_pid=$!
-trap 'kill $server_pid 2>/dev/null || true' EXIT
 wstest -m fuzzingclient -s /config/fuzzingclient.json
-kill $server_pid
+kill "$server_pid"
+server_pid=
 
 wstest -m fuzzingserver -s /config/fuzzingserver.json &
-fuzzingserver_pid=$!
-trap 'kill $fuzzingserver_pid 2>/dev/null || true' EXIT
 until (exec 3<>/dev/tcp/127.0.0.1/9001) 2>/dev/null; do sleep 1; done
-target/release/examples/autobahn_client
-kill $fuzzingserver_pid
+target/release/examples/autobahn_client 2>/dev/null
+docker stop "$container" >/dev/null
 
 failed=0
 for side in server client; do

@@ -5,8 +5,8 @@ use std::net::TcpStream;
 
 use embedded_io_adapters::std::FromStd;
 use embedded_io_websocket::{
-    blocking::Framer, FramerError, FramerState, ReadResult, WebSocketClient,
-    WebSocketCloseStatusCode, WebSocketOptions, WebSocketSendMessageType,
+    blocking::Framer, FramerError, FramerState, ReadResult, WebSocketClient, WebSocketOptions,
+    WebSocketSendMessageType,
 };
 
 const ADDRESS: &str = "127.0.0.1:9001";
@@ -90,14 +90,7 @@ impl Buffers {
                 Ok(ReadResult::Binary(binary)) => (WebSocketSendMessageType::Binary, binary),
                 Ok(ReadResult::Pong(_)) => continue,
                 Ok(ReadResult::Closed) => return Ok(()),
-                Err(error) => {
-                    let close_status = match error {
-                        FramerError::Utf8(_) => WebSocketCloseStatusCode::InvalidPayloadData,
-                        _ => WebSocketCloseStatusCode::ProtocolError,
-                    };
-                    let _ = framer.close(&mut stream, close_status, None);
-                    return Err(error);
-                }
+                Err(error) => return Err(error),
             };
             if on_message(message_type, payload) {
                 framer.write(&mut stream, message_type, true, payload)?;
