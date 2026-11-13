@@ -4,66 +4,29 @@
 // Demo websocket server that listens on localhost port 1337 using the async framer.
 // If accessed from a browser it will return a web page that will automatically attempt to
 // open a websocket connection to itself. Alternatively, the client_async.rs example
-// can be used to open a websocket connection directly. The server will echo all Text and Ping
+// can be used to open a websocket connection directly. The server will echo all Text
 // messages back to the client as well as responding to any opening and closing handshakes.
 // Any stream implementing the embedded-io-async traits works the same way, for example the
 // TcpSocket of embassy-net. Here a tokio TcpStream is wrapped with embedded-io-adapters.
 // Run with: cargo run --example server_async --features asynch
 
-use std::str::Utf8Error;
-
 use embedded_io_adapters::tokio_1::FromTokio;
-use embedded_io_async::{Read, Write};
 use tokio::net::{TcpListener, TcpStream};
 
 use embedded_io_websocket::{
-    self as ws, asynch::Framer, FramerError, FramerState, ReadResult, WebSocketContext,
-    WebSocketSendMessageType, WebSocketServer,
+    asynch::Framer, Decision, FramerError, FramerState, ReadResult, WebSocketSendMessageType,
+    WebSocketServer,
 };
 
-type Result<T> = std::result::Result<T, WebServerError>;
-
-#[derive(Debug)]
-pub enum WebServerError {
-    Io(std::io::Error),
-    Framer(FramerError<std::io::Error>),
-    WebSocket(ws::Error),
-    Utf8Error,
-}
-
-impl From<std::io::Error> for WebServerError {
-    fn from(err: std::io::Error) -> WebServerError {
-        WebServerError::Io(err)
-    }
-}
-
-impl From<FramerError<std::io::Error>> for WebServerError {
-    fn from(err: FramerError<std::io::Error>) -> WebServerError {
-        WebServerError::Framer(err)
-    }
-}
-
-impl From<ws::Error> for WebServerError {
-    fn from(err: ws::Error) -> WebServerError {
-        WebServerError::WebSocket(err)
-    }
-}
-
-impl From<Utf8Error> for WebServerError {
-    fn from(_: Utf8Error) -> WebServerError {
-        WebServerError::Utf8Error
-    }
-}
-
 #[tokio::main]
-async fn main() -> Result<()> {
+async fn main() -> std::io::Result<()> {
     let addr = "127.0.0.1:1337";
     let listener = TcpListener::bind(addr).await?;
     println!("Listening on: {}", addr);
 
     loop {
         let (stream, addr) = listener.accept().await?;
-        println!("incomming connection from {addr:?}");
+        println!("Client connected {addr:?}");
         tokio::spawn(async {
             match handle_client(stream).await {
                 Ok(()) => println!("Connection closed"),
@@ -73,110 +36,42 @@ async fn main() -> Result<()> {
     }
 }
 
-async fn handle_client(stream: TcpStream) -> Result<()> {
-    println!("Client connected {}", stream.peer_addr()?);
+async fn handle_client(stream: TcpStream) -> Result<(), FramerError<std::io::Error>> {
     let mut stream = FromTokio::new(stream);
     let mut read_buf = [0; 4000];
-    let mut read_cursor = 0;
+    let mut write_buf = [0; 4000];
+    let mut frame_buf = [0; 4000];
+    let mut state = FramerState::new();
+    let mut websocket = WebSocketServer::new_server();
+    let mut framer = Framer::new(&mut read_buf, &mut state, &mut write_buf, &mut websocket);
 
-    if let Some(websocket_context) =
-        read_header(&mut stream, &mut read_buf, &mut read_cursor).await?
-    {
-        // this is a websocket upgrade HTTP request
-        let mut write_buf = [0; 4000];
-        let mut frame_buf = [0; 4000];
-        let mut websocket = WebSocketServer::new_server();
-        let mut state = FramerState::with_buffered(read_cursor);
-        let mut framer = Framer::new(&mut read_buf, &mut state, &mut write_buf, &mut websocket);
-
-        // complete the opening handshake with the client
-        framer.accept(&mut stream, &websocket_context, None).await?;
-        println!("Websocket connection opened");
-
-        // read websocket frames
-        while let ReadResult::Text(text) = framer.read(&mut stream, &mut frame_buf).await? {
-            println!("Received: {}", text);
-
-            // send the text back to the client
-            framer
-                .write(
-                    &mut stream,
-                    WebSocketSendMessageType::Text,
-                    true,
-                    text.as_bytes(),
-                )
-                .await?
-        }
-
-        println!("Closing websocket connection");
+    let is_open = framer
+        .accept(&mut stream, |request| match request.path() {
+            "/chat" => Decision::Accept { sub_protocol: None },
+            "/" => Decision::Respond(ROOT_HTML.as_bytes()),
+            _ => Decision::Respond(NOT_FOUND.as_bytes()),
+        })
+        .await?;
+    if !is_open {
+        return Ok(());
     }
+    println!("Websocket connection opened");
 
-    Ok(())
-}
-
-async fn read_header(
-    stream: &mut FromTokio<TcpStream>,
-    read_buf: &mut [u8],
-    read_cursor: &mut usize,
-) -> Result<Option<WebSocketContext>> {
-    loop {
-        let mut headers = [httparse::EMPTY_HEADER; 16];
-        let mut request = httparse::Request::new(&mut headers);
-
-        let received_size = stream.read(&mut read_buf[*read_cursor..]).await?;
-        if received_size == 0 {
-            return Ok(None);
-        }
-        let total_size = *read_cursor + received_size;
-
-        match request.parse(&read_buf[..total_size]).unwrap() {
-            httparse::Status::Complete(len) => {
-                let headers = request.headers.iter().map(|f| (f.name, f.value));
-                match (ws::read_http_header(headers)?, request.path) {
-                    (Some(websocket_context), Some("/chat")) => {
-                        // the framer expects bytes received after the HTTP header at the start of read_buf
-                        read_buf.copy_within(len..total_size, 0);
-                        *read_cursor = total_size - len;
-                        return Ok(Some(websocket_context));
-                    }
-                    (Some(_), path) => return_404_not_found(stream, path).await?,
-                    (None, path) => handle_non_websocket_http_request(stream, path).await?,
-                }
-                return Ok(None);
-            }
-            // keep reading while the HTTP header is incomplete
-            httparse::Status::Partial => *read_cursor = total_size,
-        }
+    while let ReadResult::Text(text) = framer.read(&mut stream, &mut frame_buf).await? {
+        println!("Received: {}", text);
+        framer
+            .write(
+                &mut stream,
+                WebSocketSendMessageType::Text,
+                true,
+                text.as_bytes(),
+            )
+            .await?;
     }
-}
-
-async fn handle_non_websocket_http_request(
-    stream: &mut FromTokio<TcpStream>,
-    path: Option<&str>,
-) -> Result<()> {
-    println!("Received file request: {:?}", path);
-
-    match path {
-        Some("/") => {
-            stream.write_all(ROOT_HTML.as_bytes()).await?;
-            stream.flush().await?;
-        }
-        unknown_path => return_404_not_found(stream, unknown_path).await?,
-    };
-
     Ok(())
 }
 
-async fn return_404_not_found(
-    stream: &mut FromTokio<TcpStream>,
-    unknown_path: Option<&str>,
-) -> Result<()> {
-    println!("Unknown path: {:?}", unknown_path);
-    let html = "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
-    stream.write_all(html.as_bytes()).await?;
-    stream.flush().await?;
-    Ok(())
-}
+const NOT_FOUND: &str = "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
 
 const ROOT_HTML : &str = "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=UTF-8\r\nContent-Length: 2590\r\nConnection: close\r\n\r\n<!doctype html>
 <html>

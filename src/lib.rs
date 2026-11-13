@@ -28,7 +28,9 @@ pub use self::random::EmptyRng;
 pub mod asynch;
 pub mod blocking;
 mod framer_core;
+mod request;
 pub use self::framer_core::{FramerError, FramerState, ReadResult};
+pub use self::request::{Decision, Request};
 
 const MASK_KEY_LEN: usize = 4;
 const MAX_CONTROL_FRAME_PAYLOAD_LEN: usize = 125;

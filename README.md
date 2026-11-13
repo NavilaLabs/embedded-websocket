@@ -82,7 +82,26 @@ while let ReadResult::Text(text) = framer.read(&mut stream, &mut frame_buf)? {
 
 ## Example websocket server usage
 
-The server example is a little too verbose to include in this readme, see the [server example](./examples/server.rs).
+The framer reads the HTTP request of the opening handshake and lets you decide how to answer it, for example by path. The following is taken from the [server example](./examples/server.rs):
+
+```rust
+let mut framer = Framer::new(&mut read_buf, &mut state, &mut write_buf, &mut websocket);
+
+let is_open = framer.accept(&mut stream, |request| match request.path() {
+    "/chat" => Decision::Accept { sub_protocol: None },
+    "/" => Decision::Respond(ROOT_HTML.as_bytes()),
+    _ => Decision::Respond(NOT_FOUND.as_bytes()),
+})?;
+if !is_open {
+    return Ok(());
+}
+
+while let ReadResult::Text(text) = framer.read(&mut stream, &mut frame_buf)? {
+    framer.write(&mut stream, WebSocketSendMessageType::Text, true, text.as_bytes())?;
+}
+```
+
+`request` also gives access to the headers, for example to check `Origin` or an authentication token, and tells whether the client offered a sub protocol.
 
 ## License 
 

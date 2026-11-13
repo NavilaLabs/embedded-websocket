@@ -3,7 +3,8 @@ use core::{ops::Range, str::Utf8Error};
 use rand_core::Rng;
 
 use crate::{
-    WebSocket, WebSocketCloseStatusCode, WebSocketContext, WebSocketKey, WebSocketOptions,
+    request::{Decision, Request, MAX_HEADERS},
+    WebSocket, WebSocketCloseStatusCode, WebSocketKey, WebSocketOptions,
     WebSocketReceiveMessageType, WebSocketSendMessageType, WebSocketState, WebSocketSubProtocol,
     WebSocketType,
 };
@@ -32,6 +33,11 @@ pub enum FramerError<E> {
     Utf8(Utf8Error),
     /// The websocket protocol was violated or the operation is not valid in the current state.
     WebSocket(crate::Error),
+}
+
+pub(crate) enum Answer<'a> {
+    Accept(usize),
+    Respond(&'a [u8]),
 }
 
 pub(crate) enum Decoded<E> {
@@ -82,14 +88,8 @@ pub struct FramerState {
 impl FramerState {
     /// Creates the state for a new connection.
     pub const fn new() -> Self {
-        Self::with_buffered(0)
-    }
-
-    /// Creates the state for a connection whose read buffer already starts with `len` bytes
-    /// that arrived after the HTTP header of the opening handshake.
-    pub const fn with_buffered(len: usize) -> Self {
         Self {
-            read_cursor: len,
+            read_cursor: 0,
             frame_cursor: 0,
             unsent: 0..0,
             control_frames: 0,
@@ -151,39 +151,54 @@ where
             Err(e) => Err(FramerError::WebSocket(e)),
         }
     }
-
-    pub(crate) fn connect_read_space<E>(&mut self) -> Result<&mut [u8], FramerError<E>> {
-        if self.state.read_cursor == self.read_buf.len() {
-            return Err(FramerError::WebSocket(crate::Error::HttpHeaderIncomplete));
-        }
-        Ok(&mut self.read_buf[self.state.read_cursor..])
-    }
 }
 
 impl<'a, TRng> FramerCore<'a, TRng, crate::Server>
 where
     TRng: Rng,
 {
-    pub(crate) fn encode_accept<E>(
-        &mut self,
-        websocket_context: &WebSocketContext,
-        sub_protocol: Option<&WebSocketSubProtocol>,
-    ) -> Result<usize, FramerError<E>> {
-        if let Some(sub_protocol) = sub_protocol {
-            if !websocket_context
-                .sec_websocket_protocol_list
-                .contains(sub_protocol)
-            {
-                return Err(FramerError::WebSocket(crate::Error::SubProtocolNotOffered));
-            }
+    pub(crate) fn request_is_complete<E>(&self) -> Result<bool, FramerError<E>> {
+        let mut headers = [httparse::EMPTY_HEADER; MAX_HEADERS];
+        match httparse::Request::new(&mut headers).parse(&self.read_buf[..self.state.read_cursor]) {
+            Ok(status) => Ok(status.is_complete()),
+            Err(error) => Err(FramerError::WebSocket(error.into())),
         }
-        self.websocket
-            .server_accept(
-                &websocket_context.sec_websocket_key,
-                sub_protocol,
-                self.write_buf,
-            )
-            .map_err(FramerError::WebSocket)
+    }
+
+    pub(crate) fn answer_request<'d, E>(
+        &mut self,
+        decide: impl FnOnce(&Request<'_>) -> Decision<'d>,
+    ) -> Result<Answer<'d>, FramerError<E>> {
+        let mut headers = [httparse::EMPTY_HEADER; MAX_HEADERS];
+        let mut parsed = httparse::Request::new(&mut headers);
+        let header_len = match parsed.parse(&self.read_buf[..self.state.read_cursor]) {
+            Ok(httparse::Status::Complete(len)) => len,
+            Ok(httparse::Status::Partial) => {
+                return Err(FramerError::WebSocket(crate::Error::HttpHeaderIncomplete))
+            }
+            Err(error) => return Err(FramerError::WebSocket(error.into())),
+        };
+        let request = Request::new(&parsed, parsed.headers);
+        let sub_protocol = match decide(&request) {
+            Decision::Respond(response) => return Ok(Answer::Respond(response)),
+            Decision::Accept { sub_protocol } => sub_protocol,
+        };
+        let key = match request.upgrade_key() {
+            Ok(key) => key,
+            Err(response) => return Ok(Answer::Respond(response)),
+        };
+        let sub_protocol = sub_protocol
+            .map(|protocol| request.sub_protocol(protocol))
+            .transpose()
+            .map_err(FramerError::WebSocket)?;
+
+        let len = self
+            .websocket
+            .server_accept(&key, sub_protocol.as_ref(), self.write_buf)
+            .map_err(FramerError::WebSocket)?;
+        // bytes after the request header are the first frames of the client
+        self.consume(header_len);
+        Ok(Answer::Accept(len))
     }
 }
 
@@ -216,6 +231,13 @@ where
 
     pub(crate) fn mark_sent(&mut self, len: usize) {
         self.state.unsent.start += len;
+    }
+
+    pub(crate) fn header_read_space<E>(&mut self) -> Result<&mut [u8], FramerError<E>> {
+        if self.state.read_cursor == self.read_buf.len() {
+            return Err(FramerError::WebSocket(crate::Error::HttpHeaderIncomplete));
+        }
+        Ok(&mut self.read_buf[self.state.read_cursor..])
     }
 
     pub(crate) fn websocket_state(&self) -> WebSocketState {

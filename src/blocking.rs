@@ -10,8 +10,9 @@ use embedded_io::{Read, Write};
 use rand_core::Rng;
 
 use crate::{
-    framer_core::{Decoded, FramerCore},
-    FramerError, FramerState, ReadResult, WebSocket, WebSocketCloseStatusCode, WebSocketContext,
+    framer_core::{Answer, Decoded, FramerCore},
+    request::BAD_REQUEST,
+    Decision, FramerError, FramerState, ReadResult, Request, WebSocket, WebSocketCloseStatusCode,
     WebSocketOptions, WebSocketSendMessageType, WebSocketState, WebSocketSubProtocol,
     WebSocketType,
 };
@@ -98,7 +99,7 @@ where
 
         loop {
             let received_size = stream
-                .read(self.core.connect_read_space()?)
+                .read(self.core.header_read_space()?)
                 .map_err(FramerError::Io)?;
             if received_size == 0 {
                 return Err(FramerError::WebSocket(crate::Error::HttpHeaderIncomplete));
@@ -121,32 +122,68 @@ where
 {
     /// Performs the server side of the opening handshake.
     ///
-    /// Read the HTTP request header with [`crate::read_http_header`] first and pass the
-    /// resulting context.
+    /// Reads the HTTP request and passes it to `decide`, which accepts it or answers it with
+    /// its own HTTP response. Bytes that arrive after the request are kept for the next
+    /// [`read`](Self::read).
     ///
-    /// `sub_protocol` is the sub protocol the server chose from
-    /// [`WebSocketContext::sec_websocket_protocol_list`], or `None` to choose none.
+    /// Returns `true` if the websocket is open and `false` if the request was answered with an
+    /// HTTP response instead: the one `decide` chose, or `400 Bad Request` or
+    /// `426 Upgrade Required` for a request that `decide` accepted but that is not a valid
+    /// websocket upgrade. Close the connection after `false`.
     ///
     /// # Errors
     ///
-    /// * [`FramerError::Io`] if writing to the stream fails.
-    /// * [`FramerError::WebSocket`] with [`Error::SubProtocolNotOffered`] if the client did not
-    ///   offer `sub_protocol`.
+    /// * [`FramerError::Io`] if reading from or writing to the stream fails.
+    /// * [`FramerError::WebSocket`] with [`Error::HttpHeader`] if the request is not valid HTTP.
+    ///   The framer answers it with `400 Bad Request` first.
+    /// * [`FramerError::WebSocket`] with [`Error::HttpHeaderIncomplete`] if the stream ends or
+    ///   the read buffer is full before the request header is complete.
+    /// * [`FramerError::WebSocket`] with [`Error::SubProtocolNotOffered`] if `decide` accepts
+    ///   with a sub protocol the client did not offer.
     /// * [`FramerError::WebSocket`] if the websocket is already open.
     ///
+    /// [`Error::HttpHeader`]: crate::Error::HttpHeader
+    /// [`Error::HttpHeaderIncomplete`]: crate::Error::HttpHeaderIncomplete
     /// [`Error::SubProtocolNotOffered`]: crate::Error::SubProtocolNotOffered
-    pub fn accept<S>(
+    pub fn accept<'d, S>(
         &mut self,
         stream: &mut S,
-        websocket_context: &WebSocketContext,
-        sub_protocol: Option<&WebSocketSubProtocol>,
-    ) -> Result<(), FramerError<S::Error>>
+        decide: impl FnOnce(&Request<'_>) -> Decision<'d>,
+    ) -> Result<bool, FramerError<S::Error>>
     where
-        S: Write,
+        S: Read + Write,
     {
         self.send_unsent(stream)?;
-        let len = self.core.encode_accept(websocket_context, sub_protocol)?;
-        self.send(stream, len)
+        loop {
+            match self.core.request_is_complete() {
+                Ok(true) => break,
+                Ok(false) => {}
+                Err(error) => {
+                    stream.write_all(BAD_REQUEST).map_err(FramerError::Io)?;
+                    stream.flush().map_err(FramerError::Io)?;
+                    return Err(error);
+                }
+            }
+            let received_size = stream
+                .read(self.core.header_read_space()?)
+                .map_err(FramerError::Io)?;
+            if received_size == 0 {
+                return Err(FramerError::WebSocket(crate::Error::HttpHeaderIncomplete));
+            }
+            self.core.commit_read(received_size);
+        }
+
+        match self.core.answer_request(decide)? {
+            Answer::Accept(len) => {
+                self.send(stream, len)?;
+                Ok(true)
+            }
+            Answer::Respond(response) => {
+                stream.write_all(response).map_err(FramerError::Io)?;
+                stream.flush().map_err(FramerError::Io)?;
+                Ok(false)
+            }
+        }
     }
 }
 
@@ -157,8 +194,8 @@ where
 {
     /// Creates a framer.
     ///
-    /// `read_buf` holds bytes read from the stream. It must fit the HTTP response header of the
-    /// opening handshake and any control frame (up to 131 bytes).
+    /// `read_buf` holds bytes read from the stream. It must fit the HTTP header of the opening
+    /// handshake and any control frame (up to 131 bytes).
     ///
     /// `state` tracks progress across framers. A framer created with the same buffers and
     /// `state` continues where the previous one stopped.
@@ -570,112 +607,109 @@ mod tests {
         frame
     }
 
-    fn accept_with(sub_protocol: &str) -> Result<Vec<u8>, FramerError<core::convert::Infallible>> {
+    const UPGRADE_REQUEST: &str = "GET /chat HTTP/1.1\r\nHost: localhost\r\nUpgrade: websocket\r\nConnection: keep-alive, Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Protocol: chat, superchat\r\nSec-WebSocket-Version: 13\r\n\r\n";
+
+    fn accept(
+        request: &[u8],
+        decide: impl FnOnce(&Request<'_>) -> Decision<'static>,
+    ) -> (
+        Result<bool, FramerError<core::convert::Infallible>>,
+        std::string::String,
+        Option<ReadResult<'static>>,
+    ) {
         let mut read_buf = vec![0; 1024];
         let mut write_buf = vec![0; 1024];
+        let frame_buf = vec![0; 1024].leak();
         let mut state = FramerState::new();
         let mut ws_server = WebSocketServer::new_server();
         let mut framer = Framer::new(&mut read_buf, &mut state, &mut write_buf, &mut ws_server);
-        let mut stream = BufferStream::new(Vec::new());
-        let websocket_context = WebSocketContext {
-            sec_websocket_protocol_list: heapless::Vec::from_slice(&[
-                "chat".try_into().unwrap(),
-                "superchat".try_into().unwrap(),
-            ])
-            .unwrap(),
-            sec_websocket_key: "dGhlIHNhbXBsZSBub25jZQ==".try_into().unwrap(),
+        let mut stream = BufferStream::one_byte_per_read(request.to_vec());
+        let accepted = framer.accept(&mut stream, decide);
+        let next = match accepted {
+            Ok(true) => Some(framer.read(&mut stream, frame_buf).unwrap()),
+            _ => None,
         };
-        framer.accept(
-            &mut stream,
-            &websocket_context,
-            Some(&sub_protocol.try_into().unwrap()),
-        )?;
-        Ok(stream.write_buf)
+        let written = std::string::String::from_utf8_lossy(&stream.write_buf).into_owned();
+        (accepted, written, next)
     }
 
     #[test]
-    fn accept_sends_the_chosen_sub_protocol() {
-        let response = accept_with("superchat").unwrap();
-        let response = core::str::from_utf8(&response).unwrap();
-        assert!(response.contains("\r\nSec-WebSocket-Protocol: superchat\r\n"));
+    fn accept_answers_with_the_chosen_sub_protocol_and_keeps_following_frames() {
+        let mut request = UPGRADE_REQUEST.as_bytes().to_vec();
+        request.extend(client_frame(b"hi", WebSocketOpCode::TextFrame, true));
+        let (accepted, written, next) = accept(&request, |request| {
+            assert_eq!(request.path(), "/chat");
+            assert_eq!(request.header("HOST"), Some(&b"localhost"[..]));
+            assert!(request.offers("superchat") && !request.offers("mqtt"));
+            Decision::Accept {
+                sub_protocol: Some("superchat"),
+            }
+        });
+        assert!(accepted.unwrap());
+        assert!(written.starts_with("HTTP/1.1 101 Switching Protocols\r\n"));
+        assert!(written.contains("\r\nSec-WebSocket-Protocol: superchat\r\n"));
+        assert!(written.contains("\r\nSec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\r\n"));
+        assert!(matches!(next, Some(ReadResult::Text("hi"))));
+    }
+
+    #[test]
+    fn accept_sends_the_response_the_decision_chose() {
+        let not_found = b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n";
+        let (accepted, written, _) =
+            accept(UPGRADE_REQUEST.as_bytes(), |_| Decision::Respond(not_found));
+        assert!(!accepted.unwrap());
+        assert_eq!(written.as_bytes(), not_found);
     }
 
     #[test]
     fn accept_rejects_a_sub_protocol_the_client_did_not_offer() {
+        let (accepted, written, _) = accept(UPGRADE_REQUEST.as_bytes(), |_| Decision::Accept {
+            sub_protocol: Some("mqtt"),
+        });
         assert!(matches!(
-            accept_with("mqtt"),
+            accepted,
             Err(FramerError::WebSocket(crate::Error::SubProtocolNotOffered))
         ));
-    }
-
-    fn server_reads(frame: Vec<u8>) -> (FramerError<Interrupted>, Vec<u8>) {
-        let mut read_buf = vec![0; 1024];
-        let mut write_buf = vec![0; 1024];
-        let mut frame_buf = vec![0; 1024];
-        let mut state = FramerState::new();
-        let mut ws_server = WebSocketServer::new_server();
-        ws_server.state = WebSocketState::Open;
-        let mut stream = ScriptedStream::new();
-        stream.chunks.push_back(frame);
-        let mut framer = Framer::new(&mut read_buf, &mut state, &mut write_buf, &mut ws_server);
-        let error = framer.read(&mut stream, &mut frame_buf).err().unwrap();
-        (error, stream.written)
+        assert!(written.is_empty());
     }
 
     #[test]
-    fn protocol_violation_closes_with_protocol_error() {
-        let mut frame = client_frame(b"a", WebSocketOpCode::TextFrame, true);
-        frame[0] |= 0x40;
-        let (error, written) = server_reads(frame);
+    fn accept_answers_requests_that_are_no_websocket_upgrade() {
+        let accept_all = |_: &Request<'_>| Decision::Accept { sub_protocol: None };
+        for (request, status) in [
+            (
+                "GET / HTTP/1.1\r\nHost: localhost\r\n\r\n",
+                "400 Bad Request",
+            ),
+            (&UPGRADE_REQUEST.replace("GET", "POST"), "400 Bad Request"),
+            (
+                &UPGRADE_REQUEST.replace("Version: 13", "Version: 8"),
+                "426 Upgrade Required",
+            ),
+            (
+                &UPGRADE_REQUEST.replace("Sec-WebSocket-Key", "X-Key"),
+                "400 Bad Request",
+            ),
+        ] {
+            let (accepted, written, _) = accept(request.as_bytes(), accept_all);
+            assert!(!accepted.unwrap(), "{request}");
+            assert!(
+                written.starts_with(&std::format!("HTTP/1.1 {status}\r\n")),
+                "{written}"
+            );
+        }
+    }
+
+    #[test]
+    fn accept_answers_malformed_http_with_bad_request() {
+        let (accepted, written, _) = accept(b"GET /\0 HTTP/1.1\r\n\r\n", |_| Decision::Accept {
+            sub_protocol: None,
+        });
         assert!(matches!(
-            error,
-            FramerError::WebSocket(crate::Error::ReservedBitsSet)
+            accepted,
+            Err(FramerError::WebSocket(crate::Error::HttpHeader(_)))
         ));
-        assert_eq!(written, [0x88, 0x02, 0x03, 0xEA]);
-    }
-
-    #[test]
-    fn invalid_text_closes_with_invalid_payload_data() {
-        let (error, written) =
-            server_reads(client_frame(&[0xFF], WebSocketOpCode::TextFrame, true));
-        assert!(matches!(error, FramerError::Utf8(_)));
-        assert_eq!(written, [0x88, 0x02, 0x03, 0xEF]);
-    }
-
-    #[test]
-    fn invalid_text_fragment_fails_before_the_message_ends() {
-        let (error, written) = server_reads(client_frame(
-            &[b'a', 0xFF],
-            WebSocketOpCode::TextFrame,
-            false,
-        ));
-        assert!(matches!(error, FramerError::Utf8(_)));
-        assert_eq!(written, [0x88, 0x02, 0x03, 0xEF]);
-    }
-
-    #[test]
-    fn text_fragment_may_end_inside_a_character() {
-        let mut read_buf = vec![0; 1024];
-        let mut write_buf = vec![0; 1024];
-        let mut frame_buf = vec![0; 1024];
-        let mut state = FramerState::new();
-        let mut ws_server = WebSocketServer::new_server();
-        ws_server.state = WebSocketState::Open;
-        let mut stream = ScriptedStream::new();
-        let euro = "€".as_bytes();
-        stream
-            .chunks
-            .push_back(client_frame(&euro[..1], WebSocketOpCode::TextFrame, false));
-        stream.chunks.push_back(client_frame(
-            &euro[1..],
-            WebSocketOpCode::ContinuationFrame,
-            true,
-        ));
-        let mut framer = Framer::new(&mut read_buf, &mut state, &mut write_buf, &mut ws_server);
-        assert!(matches!(
-            framer.read(&mut stream, &mut frame_buf).unwrap(),
-            ReadResult::Text("€")
-        ));
+        assert!(written.starts_with("HTTP/1.1 400 Bad Request\r\n"));
     }
 
     #[test]
