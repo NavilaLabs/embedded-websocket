@@ -49,6 +49,7 @@ pub struct FramerState {
     pub(crate) read_cursor: usize,
     pub(crate) frame_cursor: usize,
     pub(crate) unsent: Range<usize>,
+    pub(crate) control_frames: u64,
 }
 
 #[cfg(any(feature = "embedded-io", feature = "embedded-io-async"))]
@@ -65,7 +66,17 @@ impl FramerState {
             read_cursor: len,
             frame_cursor: 0,
             unsent: 0..0,
+            control_frames: 0,
         }
+    }
+
+    /// Number of pings, pongs and non-final data frames decoded on this connection so far, by
+    /// the async framer only; the blocking framers do not count.
+    ///
+    /// A peer can send these without ever completing a message, so a caller that limits
+    /// messages cannot see them. Saturates at `u64::MAX`.
+    pub const fn control_frames(&self) -> u64 {
+        self.control_frames
     }
 }
 
@@ -81,6 +92,7 @@ where
     write_buf: &'a mut [u8],
     frame_cursor: FrameCursor<'a>,
     websocket: &'a mut WebSocket<TRng, TWebSocketType>,
+    control_frames: u64,
 }
 
 impl<'a, TRng> FramerCore<'a, TRng, crate::Client>
@@ -153,6 +165,7 @@ where
             write_buf,
             frame_cursor: FrameCursor::Owned(0),
             websocket,
+            control_frames: 0,
         }
     }
 
@@ -170,7 +183,12 @@ where
             write_buf,
             frame_cursor: FrameCursor::Borrowed(frame_cursor),
             websocket,
+            control_frames: 0,
         }
+    }
+
+    pub(crate) fn take_control_frames(&mut self) -> u64 {
+        core::mem::take(&mut self.control_frames)
     }
 
     pub(crate) fn state(&self) -> WebSocketState {
@@ -238,6 +256,9 @@ where
                 return Err(FramerError::FrameTooLarge(frame_buf.len()));
             }
 
+            // A frame whose payload arrives in pieces reports `end_of_message == false` for every
+            // piece, so only the call that parses a new header may count a fragment.
+            let starts_new_frame = self.websocket.continuation_read.is_none();
             let ws_result = match self
                 .websocket
                 .read(buffered, &mut frame_buf[*self.frame_cursor..])
@@ -252,6 +273,13 @@ where
             match ws_result.message_type {
                 WebSocketReceiveMessageType::Binary | WebSocketReceiveMessageType::Text => {
                     *self.frame_cursor = payload.end;
+                    let header_is_final = match &self.websocket.continuation_read {
+                        Some(unfinished) => unfinished.is_fin_bit_set,
+                        None => ws_result.end_of_message,
+                    };
+                    if starts_new_frame && !header_is_final {
+                        self.control_frames = self.control_frames.saturating_add(1);
+                    }
                     if ws_result.end_of_message {
                         *self.frame_cursor = 0;
                         return Ok(Decoded::Message(
@@ -275,6 +303,7 @@ where
                     return Ok(Decoded::Message(Message::Closed));
                 }
                 WebSocketReceiveMessageType::Ping => {
+                    self.control_frames = self.control_frames.saturating_add(1);
                     let len = self.encode_write(
                         WebSocketSendMessageType::Pong,
                         true,
@@ -283,6 +312,7 @@ where
                     return Ok(Decoded::SendThenContinue(len));
                 }
                 WebSocketReceiveMessageType::Pong => {
+                    self.control_frames = self.control_frames.saturating_add(1);
                     return Ok(Decoded::Message(Message::Pong(payload)));
                 }
             }

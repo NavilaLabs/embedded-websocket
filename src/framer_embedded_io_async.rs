@@ -71,6 +71,7 @@ where
 {
     core: FramerCore<'a, TRng, TWebSocketType>,
     unsent: &'a mut Range<usize>,
+    control_frames: &'a mut u64,
 }
 
 impl<'a, TRng> Framer<'a, TRng, crate::Client>
@@ -171,10 +172,12 @@ where
             read_cursor,
             frame_cursor,
             unsent,
+            control_frames,
         } = state;
         Self {
             core: FramerCore::resume(read_buf, read_cursor, frame_cursor, write_buf, websocket),
             unsent,
+            control_frames,
         }
     }
 
@@ -258,7 +261,13 @@ where
     {
         self.send_unsent(stream).await?;
         loop {
-            match self.core.decode(frame_buf)? {
+            // Counted right after decoding, so a cancelled read keeps the count of frames it
+            // already consumed.
+            let decoded = self.core.decode(frame_buf);
+            *self.control_frames = self
+                .control_frames
+                .saturating_add(self.core.take_control_frames());
+            match decoded? {
                 Decoded::NeedMoreData => {
                     let len = stream
                         .read(self.core.read_space()?)
@@ -523,5 +532,101 @@ mod tests {
             )
             .unwrap();
         assert_eq!(stream.written, &expected[..pong_len + text_len]);
+    }
+
+    #[tokio::test]
+    async fn counts_pings_pongs_and_non_final_fragments() {
+        let mut read_buf = vec![0; 1024];
+        let mut write_buf = vec![0; 1024];
+        let mut frame_buf = vec![0; 1024];
+        let mut state = FramerState::default();
+        let mut ws_server = WebSocketServer::new_server();
+        ws_server.state = WebSocketState::Open;
+        let mut stream = ScriptedStream::new();
+        for chunk in [
+            client_frame(b"a", WebSocketOpCode::Ping, true),
+            client_frame(b"b", WebSocketOpCode::Pong, true),
+            client_frame(b"x", WebSocketOpCode::TextFrame, false),
+            client_frame(b"y", WebSocketOpCode::ContinuationFrame, true),
+        ] {
+            stream.chunks.push_back(chunk);
+        }
+
+        let mut framer = Framer::new(&mut read_buf, &mut state, &mut write_buf, &mut ws_server);
+        assert!(matches!(
+            framer.read(&mut stream, &mut frame_buf).await.unwrap(),
+            ReadResult::Pong(_)
+        ));
+        assert!(matches!(
+            framer.read(&mut stream, &mut frame_buf).await.unwrap(),
+            ReadResult::Text("xy")
+        ));
+        assert_eq!(state.control_frames(), 3);
+    }
+
+    #[tokio::test]
+    async fn a_single_final_message_counts_no_control_frames() {
+        let mut read_buf = vec![0; 1024];
+        let mut write_buf = vec![0; 1024];
+        let mut frame_buf = vec![0; 1024];
+        let mut state = FramerState::default();
+        let mut ws_server = WebSocketServer::new_server();
+        ws_server.state = WebSocketState::Open;
+        let mut stream = ScriptedStream::new();
+        stream
+            .chunks
+            .push_back(client_frame(b"hi", WebSocketOpCode::TextFrame, true));
+
+        let mut framer = Framer::new(&mut read_buf, &mut state, &mut write_buf, &mut ws_server);
+        framer.read(&mut stream, &mut frame_buf).await.unwrap();
+        assert_eq!(state.control_frames(), 0);
+    }
+
+    async fn read_in_pieces(frames: Vec<Vec<u8>>, piece: usize) -> (FramerState, Vec<std::string::String>) {
+        let mut read_buf = vec![0; 1024];
+        let mut write_buf = vec![0; 1024];
+        let mut frame_buf = vec![0; 1024];
+        let mut state = FramerState::default();
+        let mut ws_server = WebSocketServer::new_server();
+        ws_server.state = WebSocketState::Open;
+        let mut stream = ScriptedStream::new();
+        for frame in frames {
+            for chunk in frame.chunks(piece) {
+                stream.chunks.push_back(chunk.to_vec());
+            }
+        }
+        let mut texts = Vec::new();
+        let mut framer = Framer::new(&mut read_buf, &mut state, &mut write_buf, &mut ws_server);
+        if let ReadResult::Text(text) = framer.read(&mut stream, &mut frame_buf).await.unwrap() {
+            texts.push(text.into());
+        }
+        (state, texts)
+    }
+
+    #[tokio::test]
+    async fn a_final_frame_that_arrives_in_pieces_counts_nothing() {
+        let payload = [b'a'; 200];
+        let (state, texts) = read_in_pieces(
+            vec![client_frame(&payload, WebSocketOpCode::TextFrame, true)],
+            7,
+        )
+        .await;
+        assert_eq!(texts[0].len(), 200);
+        assert_eq!(state.control_frames(), 0);
+    }
+
+    #[tokio::test]
+    async fn a_fragment_that_arrives_in_pieces_counts_once() {
+        let payload = [b'a'; 200];
+        let (state, texts) = read_in_pieces(
+            vec![
+                client_frame(&payload, WebSocketOpCode::TextFrame, false),
+                client_frame(b"z", WebSocketOpCode::ContinuationFrame, true),
+            ],
+            7,
+        )
+        .await;
+        assert_eq!(texts[0].len(), 201);
+        assert_eq!(state.control_frames(), 1);
     }
 }
