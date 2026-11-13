@@ -21,28 +21,32 @@ byteorder = { version = "1.5.0", default-features = false }
 httparse = { version = "1.9.5", default-features = false }
 rand_core = { version = "0.10.1", default-features = false }
 base64 = { version = "0.13.1", default-features = false }
-futures = { version = "0.3.31", default-features = false }
 embedded-io = { version = "0.7.1", default-features = false, optional = true }
 embedded-io-async = { version = "0.7.0", default-features = false, optional = true }
 
 [dev-dependencies]
 rand = "0.10.3"
-bytes = "1.9.0"
 tokio = { version = "1.42.0", features = [
     "macros",
     "rt-multi-thread",
-    "io-util",
+    "net",
 ] }
-tokio-util = { version = "0.7.13", features = ["net", "codec"] }
-embedded-io-adapters = { version = "0.7.0", features = ["tokio-1"] }
+embedded-io-adapters = { version = "0.7.0", features = ["std", "tokio-1"] }
 
 # see readme for no_std support
 [features]
-default = ["std"]
-# default = []
+default = []
 std = ["httparse/std", "embedded-io?/std", "embedded-io-async?/std"]
 embedded-io = ["dep:embedded-io"]
 embedded-io-async = ["dep:embedded-io-async"]
+
+[[example]]
+name = "client_embedded_io"
+required-features = ["embedded-io"]
+
+[[example]]
+name = "server_embedded_io"
+required-features = ["embedded-io"]
 
 [[example]]
 name = "client_embedded_io_async"

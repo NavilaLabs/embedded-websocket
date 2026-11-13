@@ -24,10 +24,7 @@ pub mod random;
 pub use self::http::{read_http_header, WebSocketContext};
 pub use self::random::EmptyRng;
 
-// support for working with discrete websocket frames when using IO streams
-// start here!!
-pub mod framer;
-pub mod framer_async;
+#[cfg(any(feature = "embedded-io", feature = "embedded-io-async"))]
 mod framer_core;
 #[cfg(feature = "embedded-io")]
 #[cfg_attr(docsrs, doc(cfg(feature = "embedded-io")))]
@@ -36,6 +33,10 @@ pub mod framer_embedded_io;
 #[cfg_attr(docsrs, doc(cfg(feature = "embedded-io-async")))]
 pub mod framer_embedded_io_async;
 const MASK_KEY_LEN: usize = 4;
+#[cfg_attr(
+    not(any(feature = "embedded-io", feature = "embedded-io-async")),
+    allow(dead_code)
+)]
 const MAX_CONTROL_FRAME_PAYLOAD_LEN: usize = 125;
 
 /// Result returning a websocket specific error if encountered
@@ -736,6 +737,10 @@ where
         }
     }
 
+    #[cfg_attr(
+        not(any(feature = "embedded-io", feature = "embedded-io-async")),
+        allow(dead_code)
+    )]
     fn next_control_frame_len(&self, from_buffer: &[u8]) -> Result<Option<FrameLen>> {
         if self.continuation_read.is_some() {
             return Ok(None);
@@ -891,6 +896,10 @@ struct ContinuationRead {
     mask_key: Option<[u8; 4]>,
 }
 
+#[cfg_attr(
+    not(any(feature = "embedded-io", feature = "embedded-io-async")),
+    allow(dead_code)
+)]
 struct FrameLen {
     payload: usize,
     total: usize,

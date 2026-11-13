@@ -1,7 +1,7 @@
 //! A websocket framer for async streams that implement the [`embedded_io_async`] traits.
 //!
 //! The [`Framer`] reads and writes whole websocket messages and has the same API as
-//! [`crate::framer::Framer`]. It handles stream reads that return a partial frame, a partial
+//! the blocking [`crate::framer_embedded_io::Framer`]. It handles stream reads that return a partial frame, a partial
 //! frame header or multiple frames at once.
 //!
 //! Any stream that implements [`embedded_io_async::Read`] and [`embedded_io_async::Write`]
@@ -12,8 +12,7 @@ use core::ops::Range;
 use embedded_io_async::{Read, Write};
 use rand_core::Rng;
 
-pub use crate::framer::{FramerError, ReadResult};
-pub use crate::framer_core::FramerState;
+pub use crate::framer_core::{FramerError, FramerState, ReadResult};
 use crate::{
     framer_core::{Decoded, FramerCore},
     WebSocket, WebSocketCloseStatusCode, WebSocketContext, WebSocketOptions,
@@ -175,7 +174,7 @@ where
             control_frames,
         } = state;
         Self {
-            core: FramerCore::resume(read_buf, read_cursor, frame_cursor, write_buf, websocket),
+            core: FramerCore::new(read_buf, read_cursor, frame_cursor, write_buf, websocket),
             unsent,
             control_frames,
         }
@@ -582,7 +581,10 @@ mod tests {
         assert_eq!(state.control_frames(), 0);
     }
 
-    async fn read_in_pieces(frames: Vec<Vec<u8>>, piece: usize) -> (FramerState, Vec<std::string::String>) {
+    async fn read_in_pieces(
+        frames: Vec<Vec<u8>>,
+        piece: usize,
+    ) -> (FramerState, Vec<std::string::String>) {
         let mut read_buf = vec![0; 1024];
         let mut write_buf = vec![0; 1024];
         let mut frame_buf = vec![0; 1024];

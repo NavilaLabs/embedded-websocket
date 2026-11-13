@@ -1,7 +1,7 @@
 //! A websocket framer for blocking streams that implement the [`embedded_io`] traits.
 //!
 //! The [`Framer`] reads and writes whole websocket messages and has the same API as
-//! [`crate::framer::Framer`]. It handles stream reads that return a partial frame, a partial
+//! the async [`crate::framer_embedded_io_async::Framer`]. It handles stream reads that return a partial frame, a partial
 //! frame header or multiple frames at once.
 //!
 //! Any stream that implements [`embedded_io::Read`] and [`embedded_io::Write`] works.
@@ -11,8 +11,7 @@ use core::ops::Range;
 use embedded_io::{Read, Write};
 use rand_core::Rng;
 
-pub use crate::framer::{FramerError, ReadResult};
-pub use crate::framer_core::FramerState;
+pub use crate::framer_core::{FramerError, FramerState, ReadResult};
 use crate::{
     framer_core::{Decoded, FramerCore},
     WebSocket, WebSocketCloseStatusCode, WebSocketContext, WebSocketOptions,
@@ -170,7 +169,7 @@ where
             ..
         } = state;
         Self {
-            core: FramerCore::resume(read_buf, read_cursor, frame_cursor, write_buf, websocket),
+            core: FramerCore::new(read_buf, read_cursor, frame_cursor, write_buf, websocket),
             unsent,
         }
     }
@@ -306,28 +305,48 @@ mod tests {
     use super::*;
     use crate::{WebSocketClient, WebSocketOpCode, WebSocketServer};
 
-    struct OneBytePerReadStream {
+    struct BufferStream {
         read_buf: Vec<u8>,
         read_cursor: usize,
+        max_read_len: usize,
         write_buf: Vec<u8>,
     }
 
-    impl embedded_io::ErrorType for OneBytePerReadStream {
-        type Error = core::convert::Infallible;
-    }
-
-    impl Read for OneBytePerReadStream {
-        fn read(&mut self, buf: &mut [u8]) -> Result<usize, Self::Error> {
-            if buf.is_empty() || self.read_cursor == self.read_buf.len() {
-                return Ok(0);
+    impl BufferStream {
+        fn new(read_buf: Vec<u8>) -> Self {
+            Self {
+                read_buf,
+                read_cursor: 0,
+                max_read_len: usize::MAX,
+                write_buf: Vec::new(),
             }
-            buf[0] = self.read_buf[self.read_cursor];
-            self.read_cursor += 1;
-            Ok(1)
+        }
+
+        fn one_byte_per_read(read_buf: Vec<u8>) -> Self {
+            Self {
+                max_read_len: 1,
+                ..Self::new(read_buf)
+            }
         }
     }
 
-    impl Write for OneBytePerReadStream {
+    impl embedded_io::ErrorType for BufferStream {
+        type Error = core::convert::Infallible;
+    }
+
+    impl Read for BufferStream {
+        fn read(&mut self, buf: &mut [u8]) -> Result<usize, Self::Error> {
+            let len = buf
+                .len()
+                .min(self.read_buf.len() - self.read_cursor)
+                .min(self.max_read_len);
+            buf[..len].copy_from_slice(&self.read_buf[self.read_cursor..self.read_cursor + len]);
+            self.read_cursor += len;
+            Ok(len)
+        }
+    }
+
+    impl Write for BufferStream {
         fn write(&mut self, buf: &[u8]) -> Result<usize, Self::Error> {
             self.write_buf.extend_from_slice(buf);
             Ok(buf.len())
@@ -338,45 +357,136 @@ mod tests {
         }
     }
 
-    #[test]
-    fn fragmented_frames_with_control_frames_one_byte_per_read() {
-        let mut frames = Vec::new();
+    fn server_frames(frames: &[(&str, WebSocketOpCode, bool)]) -> Vec<u8> {
+        let mut encoded = Vec::new();
         let mut scratch = vec![0u8; 1024];
         let mut ws_server = WebSocketServer::new_server();
-        for (payload, op_code, fin) in [
+        for (payload, op_code, fin) in frames {
+            let len = ws_server
+                .write_frame(payload.as_bytes(), &mut scratch, *op_code, *fin)
+                .unwrap();
+            encoded.extend_from_slice(&scratch[..len]);
+        }
+        encoded
+    }
+
+    fn fragmented_frames() -> Vec<u8> {
+        server_frames(&[
+            ("hello", WebSocketOpCode::TextFrame, false),
+            (" world", WebSocketOpCode::ContinuationFrame, false),
+            ("!", WebSocketOpCode::ContinuationFrame, true),
+        ])
+    }
+
+    fn fragmented_frames_with_ping() -> Vec<u8> {
+        server_frames(&[
             ("hello", WebSocketOpCode::TextFrame, false),
             ("", WebSocketOpCode::Ping, true),
             (" world!", WebSocketOpCode::ContinuationFrame, true),
-        ] {
-            let len = ws_server
-                .write_frame(payload.as_bytes(), &mut scratch, op_code, fin)
-                .unwrap();
-            frames.extend_from_slice(&scratch[..len]);
-        }
+        ])
+    }
 
+    fn read_texts(mut stream: BufferStream, messages: usize) -> BufferStream {
         let mut read_buf = vec![0; 1024];
         let mut write_buf = vec![0; 1024];
+        let mut frame_buf = vec![0; 1024];
         let mut state = FramerState::new();
         let mut ws_client = WebSocketClient::new_client(rand::rng());
         ws_client.state = WebSocketState::Open;
         let mut framer = Framer::new(&mut read_buf, &mut state, &mut write_buf, &mut ws_client);
-        let mut stream = OneBytePerReadStream {
-            read_buf: frames,
-            read_cursor: 0,
-            write_buf: Vec::new(),
-        };
-
-        let mut frame_buf = vec![0; 1024];
-        match framer.read(&mut stream, &mut frame_buf).unwrap() {
-            ReadResult::Text(x) => assert_eq!(x, "hello world!"),
-            _ => panic!("expected text frame"),
+        for _ in 0..messages {
+            match framer.read(&mut stream, &mut frame_buf).unwrap() {
+                ReadResult::Text(text) => assert_eq!(text, "hello world!"),
+                _ => panic!("expected text frame"),
+            }
         }
-        // unmasked pong with an empty payload
-        assert_eq!(&stream.write_buf[..2], &[0x8A, 0x80]);
-
         assert!(matches!(
             framer.read(&mut stream, &mut frame_buf).unwrap(),
             ReadResult::Closed
+        ));
+        stream
+    }
+
+    #[test]
+    fn fragmented_frames_are_joined() {
+        read_texts(BufferStream::new(fragmented_frames()), 1);
+    }
+
+    #[test]
+    fn fragmented_frames_with_control_frames() {
+        let stream = read_texts(BufferStream::new(fragmented_frames_with_ping()), 1);
+        // unmasked pong with an empty payload
+        assert_eq!(&stream.write_buf[..2], &[0x8A, 0x80]);
+    }
+
+    #[test]
+    fn fragmented_frames_with_control_frames_one_byte_per_read() {
+        let stream = read_texts(
+            BufferStream::one_byte_per_read(fragmented_frames_with_ping()),
+            1,
+        );
+        // unmasked pong with an empty payload
+        assert_eq!(&stream.write_buf[..2], &[0x8A, 0x80]);
+    }
+
+    #[test]
+    fn multiple_messages_in_one_read() {
+        let mut frames = fragmented_frames();
+        frames.extend(fragmented_frames_with_ping());
+        read_texts(BufferStream::new(frames), 2);
+    }
+
+    fn websocket_options() -> WebSocketOptions<'static> {
+        WebSocketOptions {
+            path: "/chat",
+            host: "localhost",
+            origin: "http://localhost",
+            sub_protocols: None,
+            additional_headers: None,
+        }
+    }
+
+    #[test]
+    fn frames_received_with_handshake_response() {
+        use rand::{rngs::StdRng, SeedableRng};
+
+        let mut scratch = vec![0; 1024];
+        let (_, web_socket_key) = WebSocketClient::new_client(StdRng::seed_from_u64(1))
+            .client_connect(&websocket_options(), &mut scratch)
+            .unwrap();
+        let mut ws_server = WebSocketServer::new_server();
+        let len = ws_server
+            .server_accept(&web_socket_key, None, &mut scratch)
+            .unwrap();
+        let mut received = scratch[..len].to_vec();
+        received.extend(fragmented_frames());
+
+        let mut read_buf = vec![0; 1024];
+        let mut write_buf = vec![0; 1024];
+        let mut frame_buf = vec![0; 1024];
+        let mut state = FramerState::new();
+        let mut ws_client = WebSocketClient::new_client(StdRng::seed_from_u64(1));
+        let mut framer = Framer::new(&mut read_buf, &mut state, &mut write_buf, &mut ws_client);
+        let mut stream = BufferStream::new(received);
+        framer.connect(&mut stream, &websocket_options()).unwrap();
+
+        match framer.read(&mut stream, &mut frame_buf).unwrap() {
+            ReadResult::Text(text) => assert_eq!(text, "hello world!"),
+            _ => panic!("expected text frame"),
+        }
+    }
+
+    #[test]
+    fn connect_fails_when_stream_ends_during_handshake() {
+        let mut read_buf = vec![0; 1024];
+        let mut write_buf = vec![0; 1024];
+        let mut state = FramerState::new();
+        let mut ws_client = WebSocketClient::new_client(rand::rng());
+        let mut framer = Framer::new(&mut read_buf, &mut state, &mut write_buf, &mut ws_client);
+        let mut stream = BufferStream::new(b"HTTP/1.1 101 Switching".to_vec());
+        assert!(matches!(
+            framer.connect(&mut stream, &websocket_options()),
+            Err(FramerError::WebSocket(crate::Error::HttpHeaderIncomplete))
         ));
     }
 

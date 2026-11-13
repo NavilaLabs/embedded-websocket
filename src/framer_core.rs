@@ -1,13 +1,38 @@
-use core::ops::Range;
+use core::{ops::Range, str::Utf8Error};
 
 use rand_core::Rng;
 
 use crate::{
-    framer::{FramerError, ReadResult},
     WebSocket, WebSocketCloseStatusCode, WebSocketContext, WebSocketKey, WebSocketOptions,
     WebSocketReceiveMessageType, WebSocketSendMessageType, WebSocketState, WebSocketSubProtocol,
     WebSocketType,
 };
+
+/// A whole websocket message read from the stream.
+pub enum ReadResult<'a> {
+    /// A binary message.
+    Binary(&'a [u8]),
+    /// A text message.
+    Text(&'a str),
+    /// A pong message with its payload.
+    Pong(&'a [u8]),
+    /// The close handshake is complete or the stream ended.
+    Closed,
+}
+
+/// An error of a framer operation.
+#[derive(Debug)]
+pub enum FramerError<E> {
+    /// Reading from or writing to the stream failed.
+    Io(E),
+    /// A message, frame header or control frame does not fit into its buffer. Holds the size
+    /// of that buffer.
+    FrameTooLarge(usize),
+    /// A text message is not valid UTF-8.
+    Utf8(Utf8Error),
+    /// The websocket protocol was violated or the operation is not valid in the current state.
+    WebSocket(crate::Error),
+}
 
 pub(crate) enum Decoded {
     NeedMoreData,
@@ -43,7 +68,6 @@ impl Message {
 ///
 /// Keep one per connection and pass it to every framer created for that connection. Use
 /// [`FramerState::new`] for a new connection.
-#[cfg(any(feature = "embedded-io", feature = "embedded-io-async"))]
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct FramerState {
     pub(crate) read_cursor: usize,
@@ -52,7 +76,6 @@ pub struct FramerState {
     pub(crate) control_frames: u64,
 }
 
-#[cfg(any(feature = "embedded-io", feature = "embedded-io-async"))]
 impl FramerState {
     /// Creates the state for a new connection.
     pub const fn new() -> Self {
@@ -90,7 +113,7 @@ where
     // `read_len` continues where the previous one stopped.
     read_len: &'a mut usize,
     write_buf: &'a mut [u8],
-    frame_cursor: FrameCursor<'a>,
+    frame_cursor: &'a mut usize,
     websocket: &'a mut WebSocket<TRng, TWebSocketType>,
     control_frames: u64,
 }
@@ -156,23 +179,6 @@ where
     pub(crate) fn new(
         read_buf: &'a mut [u8],
         read_len: &'a mut usize,
-        write_buf: &'a mut [u8],
-        websocket: &'a mut WebSocket<TRng, TWebSocketType>,
-    ) -> Self {
-        Self {
-            read_buf,
-            read_len,
-            write_buf,
-            frame_cursor: FrameCursor::Owned(0),
-            websocket,
-            control_frames: 0,
-        }
-    }
-
-    #[cfg(any(feature = "embedded-io", feature = "embedded-io-async"))]
-    pub(crate) fn resume(
-        read_buf: &'a mut [u8],
-        read_len: &'a mut usize,
         frame_cursor: &'a mut usize,
         write_buf: &'a mut [u8],
         websocket: &'a mut WebSocket<TRng, TWebSocketType>,
@@ -181,7 +187,7 @@ where
             read_buf,
             read_len,
             write_buf,
-            frame_cursor: FrameCursor::Borrowed(frame_cursor),
+            frame_cursor,
             websocket,
             control_frames: 0,
         }
@@ -330,34 +336,5 @@ where
     fn consume(&mut self, len: usize) {
         self.read_buf.copy_within(len..*self.read_len, 0);
         *self.read_len -= len;
-    }
-}
-
-#[cfg_attr(
-    not(any(feature = "embedded-io", feature = "embedded-io-async")),
-    allow(dead_code)
-)]
-enum FrameCursor<'a> {
-    Owned(usize),
-    Borrowed(&'a mut usize),
-}
-
-impl core::ops::Deref for FrameCursor<'_> {
-    type Target = usize;
-
-    fn deref(&self) -> &usize {
-        match self {
-            FrameCursor::Owned(cursor) => cursor,
-            FrameCursor::Borrowed(cursor) => cursor,
-        }
-    }
-}
-
-impl core::ops::DerefMut for FrameCursor<'_> {
-    fn deref_mut(&mut self) -> &mut usize {
-        match self {
-            FrameCursor::Owned(cursor) => cursor,
-            FrameCursor::Borrowed(cursor) => cursor,
-        }
     }
 }
