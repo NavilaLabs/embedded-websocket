@@ -1,4 +1,5 @@
 use super::*;
+use crate::{head, request::Request};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use heapless::{String, Vec};
 
@@ -11,64 +12,56 @@ pub struct WebSocketContext {
     pub sec_websocket_key: WebSocketKey,
 }
 
-// NOTE: this function is re-exported
-/// Reads an http header and extracts websocket specific information from it.
+/// Reads the HTTP request that opens a connection.
+///
+/// `from` holds the bytes received so far. Returns the length of the request head, after which
+/// the first websocket frames start, and the websocket details if the request is a valid
+/// websocket upgrade (RFC 6455 section 4.2.1).
 ///
 /// # Examples
 /// ```
 /// use embedded_io_websocket as ws;
-/// let client_request = "GET /chat HTTP/1.1
-/// Host: myserver.example.com
-/// Upgrade: websocket
-/// Connection: Upgrade
-/// Sec-WebSocket-Key: Z7OY1UwHOx/nkSz38kfPwg==
-/// Origin: http://example.com
-/// Sec-WebSocket-Protocol: chat, advancedchat
-/// Sec-WebSocket-Version: 13
+/// let client_request = "GET /chat HTTP/1.1\r\n\
+///     Host: myserver.example.com\r\n\
+///     Upgrade: websocket\r\n\
+///     Connection: Upgrade\r\n\
+///     Sec-WebSocket-Key: Z7OY1UwHOx/nkSz38kfPwg==\r\n\
+///     Origin: http://example.com\r\n\
+///     Sec-WebSocket-Protocol: chat, advancedchat\r\n\
+///     Sec-WebSocket-Version: 13\r\n\
+///     \r\n";
 ///
-/// ";
-///
-/// let mut headers = [httparse::EMPTY_HEADER; 16];
-/// let mut request = httparse::Request::new(&mut headers);
-/// request.parse(client_request.as_bytes()).unwrap();
-/// let headers = request.headers.iter().map(|f| (f.name, f.value));
-/// let ws_context = ws::read_http_header(headers).unwrap().unwrap();
+/// let (len, ws_context) = ws::read_http_header(client_request.as_bytes()).unwrap();
+/// let ws_context = ws_context.unwrap();
+/// assert_eq!(client_request.len(), len);
 /// assert_eq!("Z7OY1UwHOx/nkSz38kfPwg==", ws_context.sec_websocket_key);
-/// assert_eq!("chat", ws_context.sec_websocket_protocol_list.get(0).unwrap().as_str());
-/// assert_eq!("advancedchat", ws_context.sec_websocket_protocol_list.get(1).unwrap().as_str());
-///
+/// assert_eq!("chat", ws_context.sec_websocket_protocol_list[0]);
+/// assert_eq!("advancedchat", ws_context.sec_websocket_protocol_list[1]);
 /// ```
-pub fn read_http_header<'a>(
-    headers: impl Iterator<Item = (&'a str, &'a [u8])>,
-) -> Result<Option<WebSocketContext>> {
-    let mut sec_websocket_protocol_list: Vec<String<24>, 3> = Vec::new();
-    let mut is_websocket_request = false;
-    let mut sec_websocket_key = String::new();
-
-    for (name, value) in headers {
-        if name.eq_ignore_ascii_case("upgrade") {
-            is_websocket_request = str::from_utf8(value)?.eq_ignore_ascii_case("websocket");
-        } else if name.eq_ignore_ascii_case("sec-websocket-protocol") {
-            // extract a csv list of supported sub protocols
-            for item in str::from_utf8(value)?.split(", ") {
-                // sub protocols that do not fit are skipped, so the server never selects them
-                if let Ok(item) = String::try_from(item) {
-                    let _ = sec_websocket_protocol_list.push(item);
-                }
-            }
-        } else if name.eq_ignore_ascii_case("sec-websocket-key") {
-            sec_websocket_key = String::try_from(str::from_utf8(value)?)?;
+///
+/// # Errors
+/// * Returns `HttpHeaderIncomplete` if `from` does not contain the whole request head yet
+/// * Returns `HttpHeaderInvalid` if the request head is not valid HTTP/1.1
+pub fn read_http_header(from: &[u8]) -> Result<(usize, Option<WebSocketContext>)> {
+    let len = head::head_len(from, &mut 0).ok_or(Error::HttpHeaderIncomplete)?;
+    let request = Request::parse(&from[..len])?;
+    let Ok(sec_websocket_key) = request.upgrade_key() else {
+        return Ok((len, None));
+    };
+    let mut sec_websocket_protocol_list = Vec::new();
+    // sub protocols that do not fit are skipped, so the server never selects them
+    for offered in request.offered() {
+        if let Ok(offered) = String::try_from(offered) {
+            let _ = sec_websocket_protocol_list.push(offered);
         }
     }
-
-    if is_websocket_request {
-        Ok(Some(WebSocketContext {
+    Ok((
+        len,
+        Some(WebSocketContext {
             sec_websocket_protocol_list,
             sec_websocket_key,
-        }))
-    } else {
-        Ok(None)
-    }
+        }),
+    ))
 }
 
 pub fn read_server_connect_handshake_response(
@@ -76,53 +69,41 @@ pub fn read_server_connect_handshake_response(
     offered_sub_protocols: Option<&[&str]>,
     from: &[u8],
 ) -> Result<(usize, Option<WebSocketSubProtocol>)> {
-    let mut headers = [httparse::EMPTY_HEADER; 64];
-    let mut response = httparse::Response::new(&mut headers);
-
-    match response.parse(from)? {
-        httparse::Status::Complete(len) => {
-            match response.code {
-                Some(101) => {
-                    // we are ok
-                }
-                code => {
-                    return Err(Error::HttpResponseCodeInvalid(code));
-                }
-            };
-
-            let mut sec_websocket_protocol: Option<WebSocketSubProtocol> = None;
-            let mut is_accepted = false;
-            for item in response.headers.iter() {
-                if item.name.eq_ignore_ascii_case("sec-websocket-accept") {
-                    let mut output = [0; 28];
-                    build_accept_string(sec_websocket_key, &mut output)?;
-
-                    let expected_accept_string = str::from_utf8(&output)?;
-                    let actual_accept_string = str::from_utf8(item.value)?;
-
-                    if actual_accept_string != expected_accept_string {
-                        return Err(Error::AcceptStringInvalid);
-                    }
-                    is_accepted = true;
-                } else if item.name.eq_ignore_ascii_case("sec-websocket-protocol") {
-                    let sub_protocol = str::from_utf8(item.value)?;
-                    if !offered_sub_protocols
-                        .unwrap_or_default()
-                        .contains(&sub_protocol)
-                    {
-                        return Err(Error::SubProtocolNotOffered);
-                    }
-                    sec_websocket_protocol = Some(String::try_from(sub_protocol)?);
-                }
-            }
-
-            if !is_accepted {
-                return Err(Error::AcceptStringInvalid);
-            }
-            Ok((len, sec_websocket_protocol))
-        }
-        httparse::Status::Partial => Err(Error::HttpHeaderIncomplete),
+    let len = head::head_len(from, &mut 0).ok_or(Error::HttpHeaderIncomplete)?;
+    let response = head::Head::parse(&from[..len])?;
+    let (version, code, _) = response.start_line().ok_or(Error::HttpHeaderInvalid)?;
+    if version != "HTTP/1.1" || code.len() != 3 {
+        return Err(Error::HttpHeaderInvalid);
     }
+    let code: u16 = code.parse().map_err(|_| Error::HttpHeaderInvalid)?;
+    if code != 101 {
+        return Err(Error::HttpResponseCodeInvalid(Some(code)));
+    }
+    // RFC 6455 section 4.1: the client must fail the connection without these
+    if !response.has_token("upgrade", "websocket") || !response.has_token("connection", "upgrade") {
+        return Err(Error::HttpHeaderInvalid);
+    }
+
+    let mut expected_accept_string = [0; 28];
+    build_accept_string(sec_websocket_key, &mut expected_accept_string)?;
+    if response.field("sec-websocket-accept") != Some(&expected_accept_string[..]) {
+        return Err(Error::AcceptStringInvalid);
+    }
+
+    let sub_protocol = match response.field("sec-websocket-protocol") {
+        Some(sub_protocol) => {
+            let sub_protocol = str::from_utf8(sub_protocol)?;
+            if !offered_sub_protocols
+                .unwrap_or_default()
+                .contains(&sub_protocol)
+            {
+                return Err(Error::SubProtocolNotOffered);
+            }
+            Some(String::try_from(sub_protocol)?)
+        }
+        None => None,
+    };
+    Ok((len, sub_protocol))
 }
 
 pub fn build_connect_handshake_request(
@@ -222,27 +203,26 @@ pub fn build_accept_string(sec_websocket_key: &WebSocketKey, output: &mut [u8; 2
 
 #[cfg(test)]
 mod capacity_tests {
+    extern crate std;
+
     use super::*;
+
+    const UPGRADE: &str = "GET / HTTP/1.1\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Version: 13\r\n";
 
     #[test]
     fn values_that_do_not_fit_are_refused_or_skipped_instead_of_panicking() {
-        let long = [b'x'; 100];
-        let headers = [
-            ("Upgrade", &b"websocket"[..]),
-            ("Sec-WebSocket-Key", &long[..]),
-        ];
+        let long = "x".repeat(100);
+        let request = std::format!("{UPGRADE}Sec-WebSocket-Key: {long}\r\n\r\n");
         assert!(matches!(
-            read_http_header(headers.into_iter()),
-            Err(Error::WriteToBufferTooSmall)
+            read_http_header(request.as_bytes()),
+            Ok((_, None))
         ));
 
-        let protocols = [&b"chat, "[..], &long[..]].concat();
-        let headers = [
-            ("Upgrade", &b"websocket"[..]),
-            ("Sec-WebSocket-Protocol", &protocols[..]),
-            ("Sec-WebSocket-Key", &b"dGhlIHNhbXBsZSBub25jZQ=="[..]),
-        ];
-        let context = read_http_header(headers.into_iter()).unwrap().unwrap();
+        let request = std::format!(
+            "{UPGRADE}Sec-WebSocket-Protocol: chat, {long}\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n"
+        );
+        let (_, context) = read_http_header(request.as_bytes()).unwrap();
+        let context = context.unwrap();
         assert_eq!(context.sec_websocket_protocol_list.len(), 1);
         assert_eq!(context.sec_websocket_protocol_list[0], "chat");
     }
@@ -250,6 +230,8 @@ mod capacity_tests {
 
 #[cfg(test)]
 mod tests {
+    extern crate std;
+
     use super::*;
 
     #[test]
@@ -271,6 +253,19 @@ mod tests {
             read_server_connect_handshake_response(&key(), None, response),
             Err(Error::AcceptStringInvalid)
         );
+    }
+
+    #[test]
+    fn response_without_upgrade_headers_is_rejected() {
+        let accept = "Sec-WebSocket-Accept: ptPnPeDOTo6khJlzmLhOZSh2tAY=\r\n";
+        for headers in ["Connection: Upgrade\r\n", "Upgrade: websocket\r\n"] {
+            let response =
+                std::format!("HTTP/1.1 101 Switching Protocols\r\n{headers}{accept}\r\n");
+            assert_eq!(
+                read_server_connect_handshake_response(&key(), None, response.as_bytes()),
+                Err(Error::HttpHeaderInvalid)
+            );
+        }
     }
 
     #[test]

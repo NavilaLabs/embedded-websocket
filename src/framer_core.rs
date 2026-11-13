@@ -3,7 +3,8 @@ use core::{ops::Range, str::Utf8Error};
 use rand_core::Rng;
 
 use crate::{
-    request::{Decision, Request, MAX_HEADERS},
+    head,
+    request::{Decision, Request},
     WebSocket, WebSocketCloseStatusCode, WebSocketKey, WebSocketOptions,
     WebSocketReceiveMessageType, WebSocketSendMessageType, WebSocketState, WebSocketSubProtocol,
     WebSocketType,
@@ -137,19 +138,17 @@ where
         &mut self,
         web_socket_key: &WebSocketKey,
         sub_protocols: Option<&[&str]>,
+        searched: &mut usize,
     ) -> Result<Option<Option<WebSocketSubProtocol>>, FramerError<E>> {
-        match self.websocket.client_accept(
-            web_socket_key,
-            sub_protocols,
-            &self.read_buf[..self.state.read_cursor],
-        ) {
-            Ok((len, sub_protocol)) => {
-                self.consume(len);
-                Ok(Some(sub_protocol))
-            }
-            Err(crate::Error::HttpHeaderIncomplete) => Ok(None),
-            Err(e) => Err(FramerError::WebSocket(e)),
-        }
+        let Some(head_len) = self.head_len(searched) else {
+            return Ok(None);
+        };
+        let (len, sub_protocol) = self
+            .websocket
+            .client_accept(web_socket_key, sub_protocols, &self.read_buf[..head_len])
+            .map_err(FramerError::WebSocket)?;
+        self.consume(len);
+        Ok(Some(sub_protocol))
     }
 }
 
@@ -157,28 +156,12 @@ impl<'a, TRng> FramerCore<'a, TRng, crate::Server>
 where
     TRng: Rng,
 {
-    pub(crate) fn request_is_complete<E>(&self) -> Result<bool, FramerError<E>> {
-        let mut headers = [httparse::EMPTY_HEADER; MAX_HEADERS];
-        match httparse::Request::new(&mut headers).parse(&self.read_buf[..self.state.read_cursor]) {
-            Ok(status) => Ok(status.is_complete()),
-            Err(error) => Err(FramerError::WebSocket(error.into())),
-        }
-    }
-
     pub(crate) fn answer_request<'d, E>(
         &mut self,
+        head_len: usize,
         decide: impl FnOnce(&Request<'_>) -> Decision<'d>,
     ) -> Result<Answer<'d>, FramerError<E>> {
-        let mut headers = [httparse::EMPTY_HEADER; MAX_HEADERS];
-        let mut parsed = httparse::Request::new(&mut headers);
-        let header_len = match parsed.parse(&self.read_buf[..self.state.read_cursor]) {
-            Ok(httparse::Status::Complete(len)) => len,
-            Ok(httparse::Status::Partial) => {
-                return Err(FramerError::WebSocket(crate::Error::HttpHeaderIncomplete))
-            }
-            Err(error) => return Err(FramerError::WebSocket(error.into())),
-        };
-        let request = Request::new(&parsed, parsed.headers);
+        let request = Request::parse(&self.read_buf[..head_len]).map_err(FramerError::WebSocket)?;
         let sub_protocol = match decide(&request) {
             Decision::Respond(response) => return Ok(Answer::Respond(response)),
             Decision::Accept { sub_protocol } => sub_protocol,
@@ -197,7 +180,7 @@ where
             .server_accept(&key, sub_protocol.as_ref(), self.write_buf)
             .map_err(FramerError::WebSocket)?;
         // bytes after the request header are the first frames of the client
-        self.consume(header_len);
+        self.consume(head_len);
         Ok(Answer::Accept(len))
     }
 }
@@ -231,6 +214,10 @@ where
 
     pub(crate) fn mark_sent(&mut self, len: usize) {
         self.state.unsent.start += len;
+    }
+
+    pub(crate) fn head_len(&self, searched: &mut usize) -> Option<usize> {
+        head::head_len(&self.read_buf[..self.state.read_cursor], searched)
     }
 
     pub(crate) fn header_read_space<E>(&mut self) -> Result<&mut [u8], FramerError<E>> {

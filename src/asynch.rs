@@ -100,6 +100,7 @@ where
         let (len, web_socket_key) = self.core.encode_connect(websocket_options)?;
         self.send(stream, len).await?;
 
+        let mut searched = 0;
         loop {
             let received_size = stream
                 .read(self.core.header_read_space()?)
@@ -110,10 +111,11 @@ where
             }
             self.core.commit_read(received_size);
 
-            if let Some(sub_protocol) = self
-                .core
-                .decode_connect_response(&web_socket_key, websocket_options.sub_protocols)?
-            {
+            if let Some(sub_protocol) = self.core.decode_connect_response(
+                &web_socket_key,
+                websocket_options.sub_protocols,
+                &mut searched,
+            )? {
                 return Ok(sub_protocol);
             }
         }
@@ -135,18 +137,21 @@ where
     /// `426 Upgrade Required` for a request that `decide` accepted but that is not a valid
     /// websocket upgrade. Close the connection after `false`.
     ///
+    /// Unlike [`read`](Self::read) and [`write`](Self::write), `accept` cannot be resumed: close
+    /// the connection if it fails or is cancelled.
+    ///
     /// # Errors
     ///
     /// * [`FramerError::Io`] if reading from or writing to the stream fails.
-    /// * [`FramerError::WebSocket`] with [`Error::HttpHeader`] if the request is not valid HTTP.
-    ///   The framer answers it with `400 Bad Request` first.
+    /// * [`FramerError::WebSocket`] with [`Error::HttpHeaderInvalid`] if the request is not
+    ///   valid HTTP/1.1. The framer answers it with `400 Bad Request` first.
     /// * [`FramerError::WebSocket`] with [`Error::HttpHeaderIncomplete`] if the stream ends or
     ///   the read buffer is full before the request header is complete.
     /// * [`FramerError::WebSocket`] with [`Error::SubProtocolNotOffered`] if `decide` accepts
     ///   with a sub protocol the client did not offer.
     /// * [`FramerError::WebSocket`] if the websocket is already open.
     ///
-    /// [`Error::HttpHeader`]: crate::Error::HttpHeader
+    /// [`Error::HttpHeaderInvalid`]: crate::Error::HttpHeaderInvalid
     /// [`Error::HttpHeaderIncomplete`]: crate::Error::HttpHeaderIncomplete
     /// [`Error::SubProtocolNotOffered`]: crate::Error::SubProtocolNotOffered
     pub async fn accept<'d, S>(
@@ -158,18 +163,10 @@ where
         S: Read + Write,
     {
         self.send_unsent(stream).await?;
-        loop {
-            match self.core.request_is_complete() {
-                Ok(true) => break,
-                Ok(false) => {}
-                Err(error) => {
-                    stream
-                        .write_all(BAD_REQUEST)
-                        .await
-                        .map_err(FramerError::Io)?;
-                    stream.flush().await.map_err(FramerError::Io)?;
-                    return Err(error);
-                }
+        let mut searched = 0;
+        let head_len = loop {
+            if let Some(len) = self.core.head_len(&mut searched) {
+                break len;
             }
             let received_size = stream
                 .read(self.core.header_read_space()?)
@@ -179,9 +176,20 @@ where
                 return Err(FramerError::WebSocket(crate::Error::HttpHeaderIncomplete));
             }
             self.core.commit_read(received_size);
-        }
+        };
 
-        match self.core.answer_request(decide)? {
+        let answer = match self.core.answer_request(head_len, decide) {
+            Err(error @ FramerError::WebSocket(crate::Error::HttpHeaderInvalid)) => {
+                stream
+                    .write_all(BAD_REQUEST)
+                    .await
+                    .map_err(FramerError::Io)?;
+                stream.flush().await.map_err(FramerError::Io)?;
+                return Err(error);
+            }
+            answer => answer?,
+        };
+        match answer {
             Answer::Accept(len) => {
                 self.send(stream, len).await?;
                 Ok(true)

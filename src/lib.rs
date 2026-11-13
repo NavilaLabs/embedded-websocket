@@ -28,6 +28,7 @@ pub use self::random::EmptyRng;
 pub mod asynch;
 pub mod blocking;
 mod framer_core;
+mod head;
 mod request;
 pub use self::framer_core::{FramerError, FramerState, ReadResult};
 pub use self::request::{Decision, Request};
@@ -206,7 +207,8 @@ pub enum Error {
     WebsocketAlreadyOpen,
     Utf8Error,
     Unknown,
-    HttpHeader(httparse::Error),
+    /// The HTTP header of the opening handshake is not valid HTTP/1.1
+    HttpHeaderInvalid,
     HttpHeaderNoPath,
     HttpHeaderIncomplete,
     WriteToBufferTooSmall,
@@ -224,12 +226,6 @@ pub enum Error {
     FragmentedControlFrame,
     /// A text or binary frame starts while a fragmented message is still incomplete
     UnexpectedDataFrame,
-}
-
-impl From<httparse::Error> for Error {
-    fn from(err: httparse::Error) -> Error {
-        Error::HttpHeader(err)
-    }
 }
 
 impl From<str::Utf8Error> for Error {
@@ -259,7 +255,6 @@ impl From<()> for Error {
 impl core::fmt::Display for Error {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
-            Error::HttpHeader(error) => write!(f, "bad http header {error}"),
             Error::HttpResponseCodeInvalid(Some(code)) => write!(f, "bad http response ({code})"),
             _ => write!(f, "{:?}", self),
         }
@@ -267,15 +262,7 @@ impl core::fmt::Display for Error {
 }
 
 #[cfg(feature = "std")]
-impl std::error::Error for Error {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        if let Self::HttpHeader(error) = self {
-            Some(error)
-        } else {
-            None
-        }
-    }
-}
+impl std::error::Error for Error {}
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 enum WebSocketOpCode {
@@ -1329,30 +1316,28 @@ mod tests {
 
     #[test]
     fn opening_handshake() {
-        let client_request = "GET /chat HTTP/1.1
-Host: localhost:5000
-User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:62.0) Gecko/20100101 Firefox/62.0
-Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8
-Accept-Language: en-US,en;q=0.5
-Accept-Encoding: gzip, deflate
-Sec-WebSocket-Version: 13
-Origin: http://localhost:5000
-Sec-WebSocket-Extensions: permessage-deflate
-Sec-WebSocket-Key: Z7OY1UwHOx/nkSz38kfPwg==
-Sec-WebSocket-Protocol: chat
-DNT: 1
-Connection: keep-alive, Upgrade
-Pragma: no-cache
-Cache-Control: no-cache
-Upgrade: websocket
+        let client_request = "GET /chat HTTP/1.1\r\n\
+         Host: localhost:5000\r\n\
+         User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:62.0) Gecko/20100101 Firefox/62.0\r\n\
+         Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8\r\n\
+         Accept-Language: en-US,en;q=0.5\r\n\
+         Accept-Encoding: gzip, deflate\r\n\
+         Sec-WebSocket-Version: 13\r\n\
+         Origin: http://localhost:5000\r\n\
+         Sec-WebSocket-Extensions: permessage-deflate\r\n\
+         Sec-WebSocket-Key: Z7OY1UwHOx/nkSz38kfPwg==\r\n\
+         Sec-WebSocket-Protocol: chat\r\n\
+         DNT: 1\r\n\
+         Connection: keep-alive, Upgrade\r\n\
+         Pragma: no-cache\r\n\
+         Cache-Control: no-cache\r\n\
+         Upgrade: websocket\r\n\
+         \r\n\
+         ";
 
-";
-
-        let mut headers = [httparse::EMPTY_HEADER; 16];
-        let mut request = httparse::Request::new(&mut headers);
-        request.parse(client_request.as_bytes()).unwrap();
-        let headers = headers.iter().map(|f| (f.name, f.value));
-        let web_socket_context = read_http_header(headers).unwrap().unwrap();
+        let (len, web_socket_context) = read_http_header(client_request.as_bytes()).unwrap();
+        assert_eq!(len, client_request.len());
+        let web_socket_context = web_socket_context.unwrap();
         assert_eq!(
             "Z7OY1UwHOx/nkSz38kfPwg==",
             web_socket_context.sec_websocket_key
