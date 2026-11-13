@@ -21,7 +21,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.100.0
         with:
           components: clippy
-      - run: cargo clippy --lib --examples --features "${{ matrix.features }}"
+      - run: cargo clippy --all-targets --features "${{ matrix.features }}"
       - run: cargo test --features "${{ matrix.features }}"
 
   msrv:

@@ -1413,7 +1413,7 @@ mod tests {
             "chat",
             web_socket_context
                 .sec_websocket_protocol_list
-                .get(0)
+                .first()
                 .unwrap()
                 .as_str()
         );
@@ -1521,7 +1521,7 @@ mod tests {
             .write(
                 WebSocketSendMessageType::Text,
                 true,
-                &hello.as_bytes(),
+                hello.as_bytes(),
                 &mut buffer1,
             )
             .unwrap();
@@ -1549,7 +1549,7 @@ mod tests {
             .write(
                 WebSocketSendMessageType::Text,
                 true,
-                &hello.as_bytes(),
+                hello.as_bytes(),
                 &mut buffer1,
             )
             .unwrap();
@@ -1576,7 +1576,7 @@ mod tests {
             .write(
                 WebSocketSendMessageType::Text,
                 true,
-                &hello.as_bytes(),
+                hello.as_bytes(),
                 &mut buffer1,
             )
             .unwrap();
@@ -1606,28 +1606,28 @@ mod tests {
             .write(
                 WebSocketSendMessageType::Text,
                 true,
-                &hello.as_bytes(),
+                hello.as_bytes(),
                 &mut buffer1,
             )
             .unwrap();
 
         let ws_result = ws_client.read(&buffer1[..2], &mut buffer2).unwrap();
         assert_eq!(0, ws_result.len_to);
-        assert_eq!(false, ws_result.end_of_message);
+        assert!(!ws_result.end_of_message);
         let ws_result = ws_client.read(&buffer1[2..3], &mut buffer2).unwrap();
         assert_eq!(1, ws_result.len_to);
         assert_eq!(
             "h",
             std::str::from_utf8(&buffer2[..ws_result.len_to]).unwrap()
         );
-        assert_eq!(false, ws_result.end_of_message);
+        assert!(!ws_result.end_of_message);
         let ws_result = ws_client.read(&buffer1[3..], &mut buffer2).unwrap();
         assert_eq!(4, ws_result.len_to);
         assert_eq!(
             "ello",
             std::str::from_utf8(&buffer2[..ws_result.len_to]).unwrap()
         );
-        assert_eq!(true, ws_result.end_of_message);
+        assert!(ws_result.end_of_message);
     }
 
     #[test]
@@ -1649,7 +1649,7 @@ mod tests {
             .unwrap();
 
         let ws_result = ws_client.read(&buffer2, &mut buffer3).unwrap();
-        assert_eq!(true, ws_result.end_of_message);
+        assert!(ws_result.end_of_message);
         assert_eq!(buffer1.len(), ws_result.len_to);
     }
 
@@ -1668,14 +1668,14 @@ mod tests {
             .write(
                 WebSocketSendMessageType::Text,
                 true,
-                &message.as_bytes(),
+                message.as_bytes(),
                 &mut buffer1,
             )
             .unwrap();
 
         let mut buffer2_cursor = 0;
         let ws_result = ws_client.read(&buffer1[..40], &mut buffer2).unwrap();
-        assert_eq!(false, ws_result.end_of_message);
+        assert!(!ws_result.end_of_message);
         buffer2_cursor += ws_result.len_to;
         let ws_result = ws_client
             .read(
@@ -1683,7 +1683,7 @@ mod tests {
                 &mut buffer2[buffer2_cursor..],
             )
             .unwrap();
-        assert_eq!(true, ws_result.end_of_message);
+        assert!(ws_result.end_of_message);
         buffer2_cursor += ws_result.len_to;
 
         assert_eq!(
@@ -1707,7 +1707,7 @@ mod tests {
             .write(
                 WebSocketSendMessageType::Text,
                 true,
-                &message1.as_bytes(),
+                message1.as_bytes(),
                 &mut buffer1,
             )
             .unwrap();
@@ -1716,7 +1716,7 @@ mod tests {
             .write(
                 WebSocketSendMessageType::Text,
                 true,
-                &message2.as_bytes(),
+                message2.as_bytes(),
                 &mut buffer1[len..],
             )
             .unwrap();
@@ -1726,13 +1726,13 @@ mod tests {
         let ws_result = ws_server
             .read(&buffer1[buffer1_cursor..], &mut buffer2)
             .unwrap();
-        assert_eq!(true, ws_result.end_of_message);
+        assert!(ws_result.end_of_message);
         buffer1_cursor += ws_result.len_from;
         buffer2_cursor += ws_result.len_to;
         let ws_result = ws_server
             .read(&buffer1[buffer1_cursor..], &mut buffer2[buffer2_cursor..])
             .unwrap();
-        assert_eq!(true, ws_result.end_of_message);
+        assert!(ws_result.end_of_message);
         assert_eq!(
             message1,
             std::str::from_utf8(&buffer2[..buffer2_cursor]).unwrap()
@@ -1760,7 +1760,7 @@ mod tests {
             .write(
                 WebSocketSendMessageType::Text,
                 true,
-                &hello.as_bytes(),
+                hello.as_bytes(),
                 &mut buffer1,
             )
             .unwrap();
@@ -1771,7 +1771,7 @@ mod tests {
             "h",
             std::str::from_utf8(&buffer2[..ws_result.len_to]).unwrap()
         );
-        assert_eq!(false, ws_result.end_of_message);
+        assert!(!ws_result.end_of_message);
         let ws_result = ws_client
             .read(&buffer1[ws_result.len_from..], &mut buffer2[..4])
             .unwrap();
@@ -1780,7 +1780,7 @@ mod tests {
             "ello",
             std::str::from_utf8(&buffer2[..ws_result.len_to]).unwrap()
         );
-        assert_eq!(true, ws_result.end_of_message);
+        assert!(ws_result.end_of_message);
     }
 
     #[test]
@@ -1831,7 +1831,7 @@ mod tests {
             .write(
                 WebSocketSendMessageType::Text,
                 false,
-                &hello.as_bytes(),
+                hello.as_bytes(),
                 &mut buffer1,
             )
             .unwrap();
@@ -1842,7 +1842,7 @@ mod tests {
             .write(
                 WebSocketSendMessageType::Text,
                 true,
-                &world.as_bytes(),
+                world.as_bytes(),
                 &mut buffer1[num_bytes_hello..],
             )
             .unwrap();
@@ -1852,7 +1852,7 @@ mod tests {
             .read(&buffer1[..num_bytes_hello], &mut buffer2)
             .unwrap();
         assert_eq!(WebSocketReceiveMessageType::Text, ws_result1.message_type);
-        assert_eq!(false, ws_result1.end_of_message);
+        assert!(!ws_result1.end_of_message);
         let ws_result2 = ws_client
             .read(
                 &buffer1[num_bytes_hello..num_bytes_hello + num_bytes_world],
@@ -1860,7 +1860,7 @@ mod tests {
             )
             .unwrap();
         assert_eq!(WebSocketReceiveMessageType::Text, ws_result2.message_type);
-        assert_eq!(true, ws_result2.end_of_message);
+        assert!(ws_result2.end_of_message);
 
         let received =
             std::str::from_utf8(&buffer2[..ws_result1.len_to + ws_result2.len_to]).unwrap();
@@ -1883,7 +1883,7 @@ mod tests {
             .write(
                 WebSocketSendMessageType::Text,
                 false,
-                &fragment1.as_bytes(),
+                fragment1.as_bytes(),
                 &mut buffer1,
             )
             .unwrap();
@@ -1894,7 +1894,7 @@ mod tests {
             .write(
                 WebSocketSendMessageType::Text,
                 false,
-                &fragment2.as_bytes(),
+                fragment2.as_bytes(),
                 &mut buffer1[fragment1_num_bytes..],
             )
             .unwrap();
@@ -1905,7 +1905,7 @@ mod tests {
             .write(
                 WebSocketSendMessageType::Text,
                 true,
-                &fragment3.as_bytes(),
+                fragment3.as_bytes(),
                 &mut buffer1[fragment1_num_bytes + fragment2_num_bytes..],
             )
             .unwrap();
@@ -1915,7 +1915,7 @@ mod tests {
         assert_eq!(WebSocketReceiveMessageType::Text, ws_result.message_type);
         let received = std::str::from_utf8(&buffer2[..ws_result.len_to]).unwrap();
         assert_eq!(fragment1, received);
-        assert_eq!(ws_result.end_of_message, false);
+        assert!(!ws_result.end_of_message);
         let mut read_cursor = ws_result.len_from;
 
         // check that the client receives the "fragment2" Text message
@@ -1925,7 +1925,7 @@ mod tests {
         assert_eq!(WebSocketReceiveMessageType::Text, ws_result.message_type);
         let received = std::str::from_utf8(&buffer2[..ws_result.len_to]).unwrap();
         assert_eq!(fragment2, received);
-        assert_eq!(ws_result.end_of_message, false);
+        assert!(!ws_result.end_of_message);
         read_cursor += ws_result.len_from;
 
         // check that the client receives the "fragment3" Text message
@@ -1935,22 +1935,22 @@ mod tests {
         assert_eq!(WebSocketReceiveMessageType::Text, ws_result.message_type);
         let received = std::str::from_utf8(&buffer2[..ws_result.len_to]).unwrap();
         assert_eq!(fragment3, received);
-        assert_eq!(ws_result.end_of_message, true);
+        assert!(ws_result.end_of_message);
 
         // check the actual bytes in the write buffer for fragment1
         let (is_fin_bit_set, op_code) = read_first_byte(buffer1[0]);
-        assert_eq!(is_fin_bit_set, false);
+        assert!(!is_fin_bit_set);
         assert_eq!(op_code, WebSocketOpCode::TextFrame);
 
         // check the actual bytes in the write buffer for fragment2
         let (is_fin_bit_set, op_code) = read_first_byte(buffer1[fragment1_num_bytes]);
-        assert_eq!(is_fin_bit_set, false);
+        assert!(!is_fin_bit_set);
         assert_eq!(op_code, WebSocketOpCode::ContinuationFrame);
 
         // check the actual bytes in the write buffer for fragment3
         let (is_fin_bit_set, op_code) =
             read_first_byte(buffer1[fragment1_num_bytes + fragment2_num_bytes]);
-        assert_eq!(is_fin_bit_set, true);
+        assert!(is_fin_bit_set);
         assert_eq!(op_code, WebSocketOpCode::ContinuationFrame);
     }
 
