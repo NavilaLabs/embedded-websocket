@@ -10,6 +10,7 @@ description = "A lightweight no_std websocket library with blocking and async fr
 keywords = ["websocket", "embedded", "no_std", "embedded-io"]
 categories = ["embedded", "no-std", "network-programming"]
 readme = "README.md"
+include = ["/src", "/examples", "/README.md", "/LICENSE-*"]
 
 [package.metadata.docs.rs]
 all-features = true
