@@ -873,6 +873,24 @@ mod tests {
         assert_eq!(stream.written, [0x88, 0x02, 0x03, 0xEA]);
     }
 
+    #[test]
+    fn unmasked_client_frame_closes_with_protocol_error() {
+        let mut read_buf = vec![0; 1024];
+        let mut write_buf = vec![0; 1024];
+        let mut frame_buf = vec![0; 1024];
+        let mut state = FramerState::new();
+        let mut ws_server = open_server();
+        let mut stream = ScriptedStream::new();
+        stream.chunks.push_back(vec![0x81, 0x01, b'a']);
+
+        let mut framer = Framer::new(&mut read_buf, &mut state, &mut write_buf, &mut ws_server);
+        assert!(matches!(
+            framer.read(&mut stream, &mut frame_buf),
+            Err(FramerError::WebSocket(crate::Error::UnmaskedClientFrame))
+        ));
+        assert_eq!(stream.written, [0x88, 0x02, 0x03, 0xEA]);
+    }
+
     fn open_server() -> WebSocketServer {
         let mut ws_server = WebSocketServer::new_server();
         ws_server.state = WebSocketState::Open;

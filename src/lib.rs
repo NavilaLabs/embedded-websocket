@@ -289,6 +289,10 @@ pub enum Error {
     UnexpectedDataFrame,
     /// A message is written while the message of a failed write is not finished yet
     UnfinishedWrite,
+    /// A server receives a frame that the client did not mask (RFC 6455 section 5.1)
+    UnmaskedClientFrame,
+    /// A client receives a frame that the server masked (RFC 6455 section 5.1)
+    MaskedServerFrame,
 }
 
 impl From<str::Utf8Error> for Error {
@@ -861,7 +865,8 @@ where
                 Ok(result)
             }
             None => {
-                let (mut result, continuation_read) = read_frame(from_buffer, to_buffer)?;
+                let (mut result, continuation_read) =
+                    read_frame(from_buffer, to_buffer, self.is_client)?;
 
                 match result.op_code {
                     WebSocketOpCode::BinaryFrame | WebSocketOpCode::TextFrame => {
@@ -1054,6 +1059,7 @@ fn read_continuation(
 fn read_frame(
     from_buffer: &[u8],
     to_buffer: &mut [u8],
+    is_client: bool,
 ) -> Result<(WebSocketFrame, Option<ContinuationRead>)> {
     if from_buffer.len() < 2 {
         return Err(Error::ReadFrameIncomplete);
@@ -1080,6 +1086,11 @@ fn read_frame(
 
     const MASK_FLAG: u8 = 0x80;
     let is_mask_bit_set = (byte2 & MASK_FLAG) == MASK_FLAG;
+    match (is_client, is_mask_bit_set) {
+        (true, true) => return Err(Error::MaskedServerFrame),
+        (false, false) => return Err(Error::UnmaskedClientFrame),
+        _ => {}
+    }
     let (len, mut num_bytes_read) = read_length(byte2, &from_buffer[2..])?;
 
     num_bytes_read += 2;
@@ -1244,6 +1255,36 @@ mod tests {
             read_frames(&[0xC1, 0x01, b'a'], 1).err(),
             Some(Error::ReservedBitsSet)
         );
+    }
+
+    #[test]
+    fn client_rejects_a_masked_frame() {
+        assert_eq!(
+            read_frames(&[0x81, 0x81, 1, 2, 3, 4, b'a' ^ 1], 1).err(),
+            Some(Error::MaskedServerFrame)
+        );
+    }
+
+    #[test]
+    fn server_rejects_an_unmasked_frame() {
+        let mut ws_server = WebSocketServer::new_server();
+        ws_server.state = WebSocketState::Open;
+        let mut to = [0; 64];
+        assert_eq!(
+            ws_server.read(&[0x81, 0x01, b'a'], &mut to).err(),
+            Some(Error::UnmaskedClientFrame)
+        );
+    }
+
+    #[test]
+    fn server_accepts_a_masked_frame() {
+        let mut ws_server = WebSocketServer::new_server();
+        ws_server.state = WebSocketState::Open;
+        let mut to = [0; 64];
+        let result = ws_server
+            .read(&[0x81, 0x81, 1, 2, 3, 4, b'a' ^ 1], &mut to)
+            .unwrap();
+        assert_eq!(&to[..result.len_to], b"a");
     }
 
     #[test]
@@ -1656,7 +1697,9 @@ mod tests {
             )
             .unwrap();
 
-        let ws_result = ws_client.read(&buffer2, &mut buffer3).unwrap();
+        let mut ws_server = WebSocketServer::new_server();
+        ws_server.state = WebSocketState::Open;
+        let ws_result = ws_server.read(&buffer2, &mut buffer3).unwrap();
         assert!(ws_result.end_of_message);
         assert_eq!(buffer1.len(), ws_result.len_to);
     }

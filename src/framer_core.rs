@@ -418,7 +418,9 @@ where
                 | crate::Error::UnexpectedContinuationFrame
                 | crate::Error::ReservedBitsSet
                 | crate::Error::FragmentedControlFrame
-                | crate::Error::UnexpectedDataFrame),
+                | crate::Error::UnexpectedDataFrame
+                | crate::Error::UnmaskedClientFrame
+                | crate::Error::MaskedServerFrame),
             ) => (
                 WebSocketCloseStatusCode::ProtocolError,
                 Failure::WebSocket(error),
