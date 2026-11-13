@@ -861,13 +861,11 @@ where
             None => {
                 let (mut result, continuation_read) = read_frame(from_buffer, to_buffer)?;
 
-                // handle fragmented messages
                 match result.op_code {
                     WebSocketOpCode::BinaryFrame | WebSocketOpCode::TextFrame => {
                         if self.continuation_frame_op_code.is_some() {
                             return Err(Error::UnexpectedDataFrame);
                         }
-                        // set the continuation frame op code if this is a fragmented message
                         self.continuation_frame_op_code = if result.is_fin_bit_set {
                             None
                         } else {
@@ -910,8 +908,6 @@ where
         let mask_bit_set_as_byte = if self.is_client { 0x80 } else { 0x00 };
         let payload_len = from_buffer.len() + if self.is_client { MASK_KEY_SIZE } else { 0 };
 
-        // write header followed by the payload
-        // header size depends on how large the payload is
         let header_size = if count < 126 {
             if payload_len + BYTE_HEADER_SIZE > to_buffer.len() {
                 return Err(Error::WriteToBufferTooSmall);
@@ -937,15 +933,13 @@ where
             LONG_HEADER_SIZE
         };
 
-        // sent by client - need to mask the data
-        // we need to mask the bytes to prevent web server caching
+        // RFC 6455 section 10.3: clients mask frames so proxies cannot be made to cache them
         if self.is_client {
             let mut mask_key = [0; MASK_KEY_SIZE];
             self.rng.fill_bytes(&mut mask_key); // clients always have an rng instance
             to_buffer[header_size..header_size + MASK_KEY_SIZE].copy_from_slice(&mask_key);
             let to_buffer_start = header_size + MASK_KEY_SIZE;
 
-            // apply the mask key to every byte in the payload. This is a hot function
             for (i, (from, to)) in from_buffer[..count]
                 .iter()
                 .zip(&mut to_buffer[to_buffer_start..to_buffer_start + count])
@@ -1005,12 +999,10 @@ fn read_into_buffer(
     to_buffer: &mut [u8],
     len: usize,
 ) -> usize {
-    // if we are trying to read more than number of bytes in either buffer
     let len_to_read = min(len, to_buffer.len(), from_buffer.len());
 
     match mask_key {
         Some(mask_key) => {
-            // apply the mask key to every byte in the payload. This is a hot function.
             for (i, (from, to)) in from_buffer[..len_to_read].iter().zip(to_buffer).enumerate() {
                 *to = *from ^ mask_key[i % MASK_KEY_LEN];
             }
@@ -1068,7 +1060,6 @@ fn read_frame(
     let byte1 = from_buffer[0];
     let byte2 = from_buffer[1];
 
-    // process first byte
     const FIN_BIT_FLAG: u8 = 0x80;
     const OP_CODE_FLAG: u8 = 0x0F;
     const RESERVED_BITS_FLAG: u8 = 0x70;
@@ -1085,7 +1076,6 @@ fn read_frame(
         return Err(Error::FragmentedControlFrame);
     }
 
-    // process second byte
     const MASK_FLAG: u8 = 0x80;
     let is_mask_bit_set = (byte2 & MASK_FLAG) == MASK_FLAG;
     let (len, mut num_bytes_read) = read_length(byte2, &from_buffer[2..])?;
@@ -1093,7 +1083,6 @@ fn read_frame(
     num_bytes_read += 2;
     let from_buffer = &from_buffer[num_bytes_read..];
 
-    // reads the mask key from the payload if the is_mask_bit_set flag is set
     let mut mask_key = if is_mask_bit_set {
         if from_buffer.len() < MASK_KEY_LEN {
             return Err(Error::ReadFrameIncomplete);
@@ -1107,7 +1096,6 @@ fn read_frame(
     };
 
     let len_read = if is_mask_bit_set {
-        // start after the mask key
         let from_buffer = &from_buffer[MASK_KEY_LEN..];
         read_into_buffer(&mut mask_key, from_buffer, to_buffer, len)
     } else {
@@ -1184,10 +1172,8 @@ fn read_length(byte2: u8, from_buffer: &[u8]) -> Result<(usize, usize)> {
     let len = byte2 & 0x7F;
 
     if len < 126 {
-        // for messages smaller than 126 bytes
         return Ok((len as usize, 0));
     } else if len == 126 {
-        // for messages smaller than 64KB
         if from_buffer.len() < 2 {
             return Err(Error::ReadFrameIncomplete);
         }
@@ -1195,7 +1181,6 @@ fn read_length(byte2: u8, from_buffer: &[u8]) -> Result<(usize, usize)> {
         buf.copy_from_slice(&from_buffer[..2]);
         return Ok((u16::from_be_bytes(buf) as usize, 2));
     } else if len == 127 {
-        // for messages larger than 64KB
         if from_buffer.len() < 8 {
             return Err(Error::ReadFrameIncomplete);
         }
@@ -1209,7 +1194,6 @@ fn read_length(byte2: u8, from_buffer: &[u8]) -> Result<(usize, usize)> {
 
 fn decode_close_frame(buffer: &mut [u8], num_bytes_read: usize, len: usize) -> WebSocketFrame {
     if len >= 2 {
-        // NOTE: for now, don't read the close status description
         let code = u16::from_be_bytes([buffer[0], buffer[1]]);
         let close_status_code = WebSocketCloseStatusCode::from_u16(code);
 
@@ -1234,10 +1218,6 @@ fn build_client_disconnected_frame(num_bytes_from: usize) -> WebSocketFrame {
         is_fin_bit_set: true,
     }
 }
-
-// ************************************************************************************************
-// **************************************** TESTS *************************************************
-// ************************************************************************************************
 
 #[cfg(test)]
 mod tests {
@@ -1818,7 +1798,6 @@ mod tests {
     fn send_two_frame_message() {
         let mut buffer1: [u8; 1000] = [0; 1000];
         let mut buffer2: [u8; 1000] = [0; 1000];
-        // let mut rng = rand::rng();
 
         let mut ws_client = WebSocketClient::new_client(rand::rng());
         ws_client.state = WebSocketState::Open;

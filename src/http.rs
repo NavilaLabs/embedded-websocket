@@ -3,7 +3,6 @@ use crate::{head, request::Request};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use heapless::{String, Vec};
 
-// NOTE: this struct is re-exported
 /// Websocket details extracted from the http header
 pub struct WebSocketContext {
     /// The list of sub protocols is restricted to a maximum of 3
