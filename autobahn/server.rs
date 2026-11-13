@@ -28,7 +28,8 @@ fn main() -> std::io::Result<()> {
 fn echo(stream: TcpStream) -> Result<(), FramerError<std::io::Error>> {
     let mut stream = FromStd::new(stream);
     let mut read_buf = vec![0; 4096];
-    let mut write_buf = vec![0; MAX_MESSAGE_LEN];
+    // smaller than most echoed messages, so they are sent in several frames
+    let mut write_buf = vec![0; 4096];
     let mut frame_buf = vec![0; MAX_MESSAGE_LEN];
 
     let mut state = FramerState::new();

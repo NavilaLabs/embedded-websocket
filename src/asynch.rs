@@ -256,16 +256,30 @@ where
         self.send(stream, len).await
     }
 
-    /// Writes `frame_buf` to the stream as one websocket frame.
+    /// Writes `frame_buf` to the stream.
     ///
-    /// Set `end_of_message` to `false` to send a message in multiple frames and to `true` for
-    /// the last frame.
+    /// A text or binary payload that does not fit into the write buffer is sent in several
+    /// frames. Set `end_of_message` to `false` to continue the message with the next call and to
+    /// `true` to end it. Ping, pong and close payloads are always sent in one frame.
+    ///
+    /// # Resuming after errors
+    ///
+    /// If a text or binary write fails, part of it may already be sent. Call `write` again with
+    /// the same arguments before writing another text or binary message: it continues where the
+    /// failed call stopped. Reads, pings, pongs and close in between are fine.
     ///
     /// # Errors
     ///
     /// * [`FramerError::Io`] if writing to the stream fails.
-    /// * [`FramerError::WebSocket`] if the websocket is not open or the frame does not fit into
-    ///   the write buffer.
+    /// * [`FramerError::WebSocket`] with [`Error::UnfinishedWrite`] if a previous write failed
+    ///   and `frame_buf` has a different length than the payload of that write.
+    /// * [`FramerError::WebSocket`] with [`Error::WriteToBufferTooSmall`] if not even one byte
+    ///   of payload fits into the write buffer, or a ping, pong or close payload does not fit.
+    /// * [`FramerError::WebSocket`] if the websocket is not open or a ping, pong or close
+    ///   payload is longer than 125 bytes.
+    ///
+    /// [`Error::UnfinishedWrite`]: crate::Error::UnfinishedWrite
+    /// [`Error::WriteToBufferTooSmall`]: crate::Error::WriteToBufferTooSmall
     pub async fn write<S>(
         &mut self,
         stream: &mut S,
@@ -277,10 +291,22 @@ where
         S: Write,
     {
         self.send_unsent(stream).await?;
-        let len = self
-            .core
-            .encode_write(message_type, end_of_message, frame_buf)?;
-        self.send(stream, len).await
+        if !matches!(
+            message_type,
+            WebSocketSendMessageType::Text | WebSocketSendMessageType::Binary
+        ) {
+            let len = self
+                .core
+                .encode_write(message_type, end_of_message, frame_buf)?;
+            return self.send(stream, len).await;
+        }
+        while let Some(len) =
+            self.core
+                .encode_next_frame(message_type, end_of_message, frame_buf)?
+        {
+            self.send(stream, len).await?;
+        }
+        Ok(())
     }
 
     /// Reads from the stream until a whole message arrived.

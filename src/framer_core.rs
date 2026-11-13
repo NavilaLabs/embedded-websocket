@@ -7,7 +7,7 @@ use crate::{
     request::{Decision, Request},
     WebSocket, WebSocketCloseStatusCode, WebSocketKey, WebSocketOptions,
     WebSocketReceiveMessageType, WebSocketSendMessageType, WebSocketState, WebSocketSubProtocol,
-    WebSocketType,
+    WebSocketType, MASK_KEY_LEN,
 };
 
 /// A whole websocket message read from the stream.
@@ -128,6 +128,15 @@ pub struct FramerState {
     // Bytes at the start of the current text message that are known to be valid UTF-8.
     pub(crate) text_checked: usize,
     pub(crate) pending: Option<Pending>,
+    pub(crate) writing: Option<WriteProgress>,
+}
+
+// How much of a message a failed write already queued, so writing it again continues there.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct WriteProgress {
+    len: usize,
+    queued: usize,
+    has_started: bool,
 }
 
 impl FramerState {
@@ -140,6 +149,7 @@ impl FramerState {
             control_frames: 0,
             text_checked: 0,
             pending: None,
+            writing: None,
         }
     }
 
@@ -295,6 +305,61 @@ where
         self.websocket
             .write(message_type, end_of_message, frame_buf, self.write_buf)
             .map_err(FramerError::WebSocket)
+    }
+
+    /// Encodes the next frame of the text or binary `payload` into the write buffer, or returns
+    /// `None` when all of it is encoded. A payload that does not fit into the write buffer is split
+    /// into several frames.
+    pub(crate) fn encode_next_frame<E>(
+        &mut self,
+        message_type: WebSocketSendMessageType,
+        end_of_message: bool,
+        payload: &[u8],
+    ) -> Result<Option<usize>, FramerError<E>> {
+        let mut progress = match self.state.writing.take() {
+            None => WriteProgress {
+                len: payload.len(),
+                queued: 0,
+                has_started: false,
+            },
+            Some(progress) if progress.len == payload.len() => progress,
+            Some(progress) => {
+                self.state.writing = Some(progress);
+                return Err(FramerError::WebSocket(crate::Error::UnfinishedWrite));
+            }
+        };
+        if progress.has_started && progress.queued == progress.len {
+            return Ok(None);
+        }
+        let remaining = progress.len - progress.queued;
+        let fragment_len = remaining.min(self.max_frame_payload());
+        if fragment_len == 0 && remaining > 0 {
+            return Err(FramerError::WebSocket(crate::Error::WriteToBufferTooSmall));
+        }
+        let is_last = fragment_len == remaining;
+        let fragment = &payload[progress.queued..progress.queued + fragment_len];
+        let len = self.encode_write(message_type, end_of_message && is_last, fragment)?;
+        progress.queued += fragment_len;
+        progress.has_started = true;
+        self.state.writing = Some(progress);
+        Ok(Some(len))
+    }
+
+    // The largest payload whose frame fits into the write buffer (RFC 6455 section 5.2).
+    fn max_frame_payload(&self) -> usize {
+        let mask_len = if self.websocket.is_client {
+            MASK_KEY_LEN
+        } else {
+            0
+        };
+        let space = self.write_buf.len().saturating_sub(mask_len);
+        if space >= 10 + 65536 {
+            space - 10
+        } else if space >= 4 + 126 {
+            (space - 4).min(u16::MAX as usize)
+        } else {
+            space.saturating_sub(2).min(125)
+        }
     }
 
     pub(crate) fn read_space<E>(&mut self) -> Result<&mut [u8], FramerError<E>> {

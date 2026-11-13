@@ -248,16 +248,30 @@ where
         self.send(stream, len)
     }
 
-    /// Writes `frame_buf` to the stream as one websocket frame.
+    /// Writes `frame_buf` to the stream.
     ///
-    /// Set `end_of_message` to `false` to send a message in multiple frames and to `true` for
-    /// the last frame.
+    /// A text or binary payload that does not fit into the write buffer is sent in several
+    /// frames. Set `end_of_message` to `false` to continue the message with the next call and to
+    /// `true` to end it. Ping, pong and close payloads are always sent in one frame.
+    ///
+    /// # Resuming after errors
+    ///
+    /// If a text or binary write fails, part of it may already be sent. Call `write` again with
+    /// the same arguments before writing another text or binary message: it continues where the
+    /// failed call stopped. Reads, pings, pongs and close in between are fine.
     ///
     /// # Errors
     ///
     /// * [`FramerError::Io`] if writing to the stream fails.
-    /// * [`FramerError::WebSocket`] if the websocket is not open or the frame does not fit into
-    ///   the write buffer.
+    /// * [`FramerError::WebSocket`] with [`Error::UnfinishedWrite`] if a previous write failed
+    ///   and `frame_buf` has a different length than the payload of that write.
+    /// * [`FramerError::WebSocket`] with [`Error::WriteToBufferTooSmall`] if not even one byte
+    ///   of payload fits into the write buffer, or a ping, pong or close payload does not fit.
+    /// * [`FramerError::WebSocket`] if the websocket is not open or a ping, pong or close
+    ///   payload is longer than 125 bytes.
+    ///
+    /// [`Error::UnfinishedWrite`]: crate::Error::UnfinishedWrite
+    /// [`Error::WriteToBufferTooSmall`]: crate::Error::WriteToBufferTooSmall
     pub fn write<S>(
         &mut self,
         stream: &mut S,
@@ -269,10 +283,22 @@ where
         S: Write,
     {
         self.send_unsent(stream)?;
-        let len = self
-            .core
-            .encode_write(message_type, end_of_message, frame_buf)?;
-        self.send(stream, len)
+        if !matches!(
+            message_type,
+            WebSocketSendMessageType::Text | WebSocketSendMessageType::Binary
+        ) {
+            let len = self
+                .core
+                .encode_write(message_type, end_of_message, frame_buf)?;
+            return self.send(stream, len);
+        }
+        while let Some(len) =
+            self.core
+                .encode_next_frame(message_type, end_of_message, frame_buf)?
+        {
+            self.send(stream, len)?;
+        }
+        Ok(())
     }
 
     /// Reads from the stream until a whole message arrived.
@@ -845,6 +871,136 @@ mod tests {
             Err(FramerError::WebSocket(crate::Error::ReservedBitsSet))
         ));
         assert_eq!(stream.written, [0x88, 0x02, 0x03, 0xEA]);
+    }
+
+    fn open_server() -> WebSocketServer {
+        let mut ws_server = WebSocketServer::new_server();
+        ws_server.state = WebSocketState::Open;
+        ws_server
+    }
+
+    // Decodes unmasked frames into (opcode, fin, payload).
+    fn frames(mut written: &[u8]) -> Vec<(u8, bool, Vec<u8>)> {
+        let mut frames = Vec::new();
+        while !written.is_empty() {
+            let (len, header) = match written[1] {
+                126 => (u16::from_be_bytes([written[2], written[3]]) as usize, 4),
+                len => (len as usize, 2),
+            };
+            frames.push((
+                written[0] & 0x0F,
+                written[0] & 0x80 != 0,
+                written[header..header + len].to_vec(),
+            ));
+            written = &written[header + len..];
+        }
+        frames
+    }
+
+    fn payloads(frames: &[(u8, bool, Vec<u8>)]) -> Vec<u8> {
+        frames
+            .iter()
+            .flat_map(|(_, _, payload)| payload.clone())
+            .collect()
+    }
+
+    #[test]
+    fn write_splits_a_payload_that_does_not_fit_into_frames() {
+        let (mut read_buf, mut write_buf, mut state) =
+            (vec![0; 64], vec![0; 64], FramerState::new());
+        let mut ws_server = open_server();
+        let mut framer = Framer::new(&mut read_buf, &mut state, &mut write_buf, &mut ws_server);
+        let mut stream = ScriptedStream::new();
+        let payload: Vec<u8> = (0..150).collect();
+        framer
+            .write(
+                &mut stream,
+                WebSocketSendMessageType::Binary,
+                true,
+                &payload,
+            )
+            .unwrap();
+        framer
+            .write(&mut stream, WebSocketSendMessageType::Ping, true, b"p")
+            .unwrap();
+
+        let frames = frames(&stream.written);
+        let kinds: Vec<_> = frames.iter().map(|(op, fin, _)| (*op, *fin)).collect();
+        assert_eq!(kinds, [(2, false), (0, false), (0, true), (9, true)]);
+        assert_eq!(payloads(&frames[..3]), payload);
+    }
+
+    #[test]
+    fn write_continues_after_a_failure_when_called_again() {
+        let (mut read_buf, mut write_buf, mut state) =
+            (vec![0; 64], vec![0; 64], FramerState::new());
+        let mut ws_server = open_server();
+        let mut stream = ScriptedStream::new();
+        let payload: Vec<u8> = (0..150).collect();
+        let mut failures = 0;
+        loop {
+            stream.write_budget = 50;
+            let mut framer = Framer::new(&mut read_buf, &mut state, &mut write_buf, &mut ws_server);
+            match framer.write(
+                &mut stream,
+                WebSocketSendMessageType::Binary,
+                true,
+                &payload,
+            ) {
+                Ok(()) => break,
+                Err(FramerError::Io(Interrupted)) => failures += 1,
+                Err(error) => panic!("write failed: {error:?}"),
+            }
+        }
+        assert!(failures > 0);
+        let frames = frames(&stream.written);
+        assert!(frames.last().unwrap().1);
+        assert_eq!(payloads(&frames), payload);
+    }
+
+    #[test]
+    fn write_of_another_message_before_finishing_a_failed_one_is_rejected() {
+        let (mut read_buf, mut write_buf, mut state) =
+            (vec![0; 64], vec![0; 64], FramerState::new());
+        let mut ws_server = open_server();
+        let mut framer = Framer::new(&mut read_buf, &mut state, &mut write_buf, &mut ws_server);
+        let mut stream = ScriptedStream::new();
+        stream.write_budget = 10;
+        assert!(framer
+            .write(
+                &mut stream,
+                WebSocketSendMessageType::Binary,
+                true,
+                &[0; 150]
+            )
+            .is_err());
+        stream.write_budget = usize::MAX;
+        assert!(matches!(
+            framer.write(&mut stream, WebSocketSendMessageType::Text, true, b"other"),
+            Err(FramerError::WebSocket(crate::Error::UnfinishedWrite))
+        ));
+        framer
+            .write(&mut stream, WebSocketSendMessageType::Ping, true, b"")
+            .unwrap();
+        framer
+            .write(
+                &mut stream,
+                WebSocketSendMessageType::Binary,
+                true,
+                &[0; 150],
+            )
+            .unwrap();
+        framer
+            .write(&mut stream, WebSocketSendMessageType::Text, true, b"other")
+            .unwrap();
+        let kinds: Vec<_> = frames(&stream.written)
+            .iter()
+            .map(|(op, fin, _)| (*op, *fin))
+            .collect();
+        assert_eq!(
+            kinds,
+            [(2, false), (9, true), (0, false), (0, true), (1, true)]
+        );
     }
 
     #[test]

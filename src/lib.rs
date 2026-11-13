@@ -226,6 +226,8 @@ pub enum Error {
     FragmentedControlFrame,
     /// A text or binary frame starts while a fragmented message is still incomplete
     UnexpectedDataFrame,
+    /// A message is written while the message of a failed write is not finished yet
+    UnfinishedWrite,
 }
 
 impl From<str::Utf8Error> for Error {
@@ -673,6 +675,8 @@ where
     /// * Returns `WriteToBufferTooSmall` when the `to` buffer is too small to fit the websocket
     ///   frame header (2-14 bytes) plus the payload. Consider fragmenting the messages by making
     ///   multiple write calls with `end_of_message` set to `false` and the final call set to `true`
+    /// * Returns `InvalidFrameLength` when the payload of a Ping, Pong or CloseReply is longer
+    ///   than 125 bytes
     pub fn write(
         &mut self,
         message_type: WebSocketSendMessageType,
@@ -693,6 +697,9 @@ where
                     self.write_frame(from, to, op_code, end_of_message)
                 }
                 _ => {
+                    if from.len() > MAX_CONTROL_FRAME_PAYLOAD_LEN {
+                        return Err(Error::InvalidFrameLength);
+                    }
                     if op_code == WebSocketOpCode::ConnectionClose {
                         self.state = WebSocketState::Closed
                     }

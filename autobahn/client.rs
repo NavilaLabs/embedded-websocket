@@ -41,7 +41,8 @@ impl Buffers {
     fn new() -> Self {
         Self {
             read_buf: vec![0; 4096],
-            write_buf: vec![0; MAX_MESSAGE_LEN],
+            // smaller than most echoed messages, so they are sent in several frames
+            write_buf: vec![0; 4096],
             frame_buf: vec![0; MAX_MESSAGE_LEN],
         }
     }

@@ -16,7 +16,7 @@ The framers let you work with whole websocket messages without dealing with frag
 * `blocking::Framer` works with any stream that implements the [embedded-io](https://crates.io/crates/embedded-io) traits.
 * `asynch::Framer` works with any stream that implements the [embedded-io-async](https://crates.io/crates/embedded-io-async) traits, for example the `TcpSocket` of [embassy-net](https://crates.io/crates/embassy-net). It needs the `asynch` feature.
 
-Both have the same API.
+Both have the same API. They split messages that do not fit into the write buffer into several frames, and a read or write that fails or is cancelled can be called again to continue where it stopped.
 
 ```
 embedded-io-websocket = { version = "x.x.x", features = ["asynch"] }

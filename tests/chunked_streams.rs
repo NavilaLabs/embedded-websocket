@@ -312,6 +312,74 @@ fn expected(conversation: &Conversation) -> Vec<Message> {
         .collect()
 }
 
+#[derive(Debug, Clone)]
+struct Outgoing {
+    messages: Vec<Message>,
+    write_buf_len: usize,
+    write_lens: Vec<usize>,
+    interruptions: Vec<bool>,
+}
+
+impl Outgoing {
+    fn stream(&self) -> ChunkedStream {
+        ChunkedStream {
+            unread: VecDeque::new(),
+            read_lens: vec![1],
+            write_lens: self.write_lens.clone(),
+            interruptions: self.interruptions.clone(),
+            calls: 0,
+            interrupted: false,
+            written: Vec::new(),
+        }
+    }
+}
+
+fn outgoing() -> impl Strategy<Value = Outgoing> {
+    (
+        prop::collection::vec(message(), 1..6),
+        20usize..300,
+        prop::collection::vec(1usize..100, 1..20),
+        prop::collection::vec(prop::bool::weighted(0.2), 1..20),
+    )
+        .prop_map(
+            |(messages, write_buf_len, write_lens, interruptions)| Outgoing {
+                messages,
+                write_buf_len,
+                write_lens,
+                interruptions,
+            },
+        )
+}
+
+/// Reads back the messages a server wrote, with a client framer.
+fn read_back(written: Vec<u8>) -> Vec<Message> {
+    let mut stream = ChunkedStream {
+        unread: written.into(),
+        read_lens: vec![usize::MAX],
+        write_lens: vec![usize::MAX],
+        interruptions: vec![false],
+        calls: 0,
+        interrupted: false,
+        written: Vec::new(),
+    };
+    let mut read_buf = vec![0; 256];
+    let mut write_buf = vec![0; 256];
+    let mut frame_buf = vec![0; 4096];
+    let mut state = FramerState::new();
+    let mut ws_client = WebSocketClient::new_client(rand::rng());
+    ws_client.state = WebSocketState::Open;
+    let mut framer =
+        blocking::Framer::new(&mut read_buf, &mut state, &mut write_buf, &mut ws_client);
+    let mut messages = Vec::new();
+    loop {
+        match received(framer.read(&mut stream, &mut frame_buf).unwrap()) {
+            Ok(message) => messages.push(message),
+            Err(End::Disconnected) => return messages,
+            Err(end) => panic!("unexpected {end:?}"),
+        }
+    }
+}
+
 proptest! {
     #[test]
     fn blocking_framer_survives_split_and_interrupted_io(conversation in conversation()) {
@@ -340,6 +408,30 @@ proptest! {
         prop_assert_eq!(messages, expected(&conversation));
         prop_assert_eq!(end, conversation.end());
         prop_assert_eq!(stream.pongs(), conversation.pings());
+    }
+
+    #[test]
+    fn blocking_framer_writes_large_messages_over_interrupted_io(outgoing in outgoing()) {
+        let mut stream = outgoing.stream();
+        let mut read_buf = vec![0; 256];
+        let mut write_buf = vec![0; outgoing.write_buf_len];
+        let mut state = FramerState::new();
+        let mut ws_server = WebSocketServer::new_server();
+        ws_server.state = WebSocketState::Open;
+
+        for message in &outgoing.messages {
+            loop {
+                let mut framer =
+                    blocking::Framer::new(&mut read_buf, &mut state, &mut write_buf, &mut ws_server);
+                match framer.write(&mut stream, message.message_type(), true, message.payload()) {
+                    Ok(()) => break,
+                    Err(FramerError::Io(Interrupted)) => {}
+                    Err(error) => panic!("write failed: {error:?}"),
+                }
+            }
+        }
+
+        prop_assert_eq!(read_back(stream.written), outgoing.messages);
     }
 }
 
@@ -425,6 +517,32 @@ mod asynch {
             prop_assert_eq!(messages, expected(&conversation));
             prop_assert_eq!(end, conversation.end());
             prop_assert_eq!(stream.pongs(), conversation.pings());
+        }
+
+        #[test]
+        fn async_framer_writes_large_messages_over_cancelled_io(outgoing in outgoing()) {
+            let mut stream = outgoing.stream();
+            let mut read_buf = vec![0; 256];
+            let mut write_buf = vec![0; outgoing.write_buf_len];
+            let mut state = FramerState::new();
+            let mut ws_server = WebSocketServer::new_server();
+            ws_server.state = WebSocketState::Open;
+
+            for message in &outgoing.messages {
+                loop {
+                    let mut framer =
+                        Framer::new(&mut read_buf, &mut state, &mut write_buf, &mut ws_server);
+                    let write =
+                        framer.write(&mut stream, message.message_type(), true, message.payload());
+                    match poll_once(write) {
+                        Poll::Ready(Ok(())) => break,
+                        Poll::Ready(Err(error)) => panic!("write failed: {error:?}"),
+                        Poll::Pending => {}
+                    }
+                }
+            }
+
+            prop_assert_eq!(read_back(stream.written), outgoing.messages);
         }
     }
 }
