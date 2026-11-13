@@ -248,6 +248,22 @@ where
         self.send(stream, len)
     }
 
+    /// Sends a keepalive ping, see [`FramerState::awaiting_pong`].
+    ///
+    /// # Errors
+    ///
+    /// * [`FramerError::Io`] if writing to the stream fails.
+    /// * [`FramerError::WebSocket`] if the websocket is not open or the write buffer cannot fit a
+    ///   ping frame.
+    pub fn ping<S>(&mut self, stream: &mut S) -> Result<(), FramerError<S::Error>>
+    where
+        S: Write,
+    {
+        self.send_unsent(stream)?;
+        let len = self.core.encode_keepalive_ping()?;
+        self.send(stream, len)
+    }
+
     /// Writes `frame_buf` to the stream.
     ///
     /// A text or binary payload that does not fit into the write buffer is sent in several
@@ -988,6 +1004,86 @@ mod tests {
             Err(FramerError::WebSocket(crate::Error::UnfinishedRead))
         ));
         assert!(stream.written.is_empty());
+    }
+
+    // Sends a keepalive ping and returns its payload.
+    fn keepalive_ping(
+        stream: &mut ScriptedStream,
+        read_buf: &mut [u8],
+        state: &mut FramerState,
+        write_buf: &mut [u8],
+        ws_server: &mut WebSocketServer,
+    ) -> Vec<u8> {
+        stream.written.clear();
+        let mut framer = Framer::new(read_buf, state, write_buf, ws_server);
+        framer.ping(stream).unwrap();
+        assert_eq!(stream.written[0], 0x89, "a ping frame");
+        stream.written[2..].to_vec()
+    }
+
+    #[test]
+    fn keepalive_ping_awaits_its_pong() {
+        let (mut read_buf, mut write_buf, mut frame_buf) =
+            (vec![0; 256], vec![0; 256], vec![0; 256]);
+        let mut state = FramerState::new();
+        let mut ws_server = open_server();
+        let mut stream = ScriptedStream::new();
+        assert!(!state.awaiting_pong());
+
+        let payload = keepalive_ping(
+            &mut stream,
+            &mut read_buf,
+            &mut state,
+            &mut write_buf,
+            &mut ws_server,
+        );
+        assert!(state.awaiting_pong());
+
+        stream
+            .chunks
+            .push_back(client_frame(&payload, WebSocketOpCode::Pong, true));
+        let mut framer = Framer::new(&mut read_buf, &mut state, &mut write_buf, &mut ws_server);
+        assert!(matches!(
+            framer.read(&mut stream, &mut frame_buf),
+            Ok(ReadResult::Pong(pong)) if pong == payload
+        ));
+        assert!(!state.awaiting_pong());
+    }
+
+    #[test]
+    fn pong_for_an_earlier_ping_keeps_awaiting_the_latest() {
+        let (mut read_buf, mut write_buf, mut frame_buf) =
+            (vec![0; 256], vec![0; 256], vec![0; 256]);
+        let mut state = FramerState::new();
+        let mut ws_server = open_server();
+        let mut stream = ScriptedStream::new();
+        let first = keepalive_ping(
+            &mut stream,
+            &mut read_buf,
+            &mut state,
+            &mut write_buf,
+            &mut ws_server,
+        );
+        let second = keepalive_ping(
+            &mut stream,
+            &mut read_buf,
+            &mut state,
+            &mut write_buf,
+            &mut ws_server,
+        );
+        assert_ne!(first, second);
+
+        for (pong, still_awaiting) in [(b"other".to_vec(), true), (first, true), (second, false)] {
+            stream
+                .chunks
+                .push_back(client_frame(&pong, WebSocketOpCode::Pong, true));
+            let mut framer = Framer::new(&mut read_buf, &mut state, &mut write_buf, &mut ws_server);
+            assert!(matches!(
+                framer.read(&mut stream, &mut frame_buf),
+                Ok(ReadResult::Pong(_))
+            ));
+            assert_eq!(state.awaiting_pong(), still_awaiting, "after pong {pong:?}");
+        }
     }
 
     fn open_server() -> WebSocketServer {

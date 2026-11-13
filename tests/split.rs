@@ -507,3 +507,44 @@ fn local_mutex_wakes_the_waiting_task_on_unlock() {
     assert_eq!(counter.0.load(Ordering::SeqCst), 1);
     assert!(poll(waiting).is_ready());
 }
+
+#[test]
+fn writer_keepalive_ping_is_cleared_by_the_reader() {
+    let written = Rc::new(RefCell::new(Vec::new()));
+    let outgoing = Outgoing {
+        written: written.clone(),
+        pacing: Pacing::steady(),
+    };
+    let incoming = Incoming {
+        unread: VecDeque::new(),
+        pacing: Pacing::steady(),
+        ends: true,
+    };
+    let (mut read_buf, mut write_buf, mut frame_buf) = (vec![0; 256], vec![0; 256], vec![0; 256]);
+    let mut state = FramerState::new();
+    let mut ws_server = open_server();
+    let shared = LocalMutex::new(Shared::new(
+        outgoing,
+        &mut state,
+        &mut write_buf,
+        &mut ws_server,
+    ));
+    let mut writer = Writer::new(&shared);
+    assert!(matches!(poll(pin!(writer.ping())), Poll::Ready(Ok(()))));
+    let payload = written.borrow()[2..].to_vec();
+    assert_eq!(written.borrow()[0], 0x89, "a ping frame");
+
+    let incoming = Incoming {
+        unread: client_frames(&[(WebSocketSendMessageType::Pong, true, &payload)]).into(),
+        ..incoming
+    };
+    let mut reader = Reader::new(&mut read_buf, incoming, &shared);
+    assert!(matches!(
+        poll(pin!(reader.read(&mut frame_buf))),
+        Poll::Ready(Ok(ReadResult::Pong(_)))
+    ));
+    let Poll::Ready(shared) = poll(pin!(shared.lock())) else {
+        panic!("the lock is free");
+    };
+    assert!(!shared.state().awaiting_pong());
+}

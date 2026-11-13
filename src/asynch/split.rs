@@ -164,6 +164,12 @@ where
         }
     }
 
+    /// Returns the state of the connection, for example to check
+    /// [`FramerState::awaiting_pong`].
+    pub fn state(&self) -> &FramerState {
+        self.state
+    }
+
     fn parts<'b>(
         &'b mut self,
         read_buf: &'b mut [u8],
@@ -343,6 +349,22 @@ where
             // gives a reader that waits for the lock a chance to take it before the next frame
             yield_now().await;
         }
+    }
+
+    /// Sends a keepalive ping, see [`FramerState::awaiting_pong`] and
+    /// [`Shared::state`].
+    ///
+    /// # Errors
+    ///
+    /// * [`FramerError::Io`] if writing to the stream fails.
+    /// * [`FramerError::WebSocket`] if the websocket is not open or the write buffer cannot fit a
+    ///   ping frame.
+    pub async fn ping(&mut self) -> Result<(), FramerError<W::Error>> {
+        let mut guard = self.shared.lock().await;
+        let (mut core, stream) = guard.parts(&mut []);
+        send_unsent(&mut core, stream).await?;
+        let len = core.encode_keepalive_ping()?;
+        send(&mut core, stream, len).await
     }
 
     /// Initiates a close handshake, see [`Framer::close`](super::Framer::close).

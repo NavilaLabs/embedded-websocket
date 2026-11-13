@@ -304,6 +304,22 @@ where
         send(&mut self.core, stream, len).await
     }
 
+    /// Sends a keepalive ping, see [`FramerState::awaiting_pong`].
+    ///
+    /// # Errors
+    ///
+    /// * [`FramerError::Io`] if writing to the stream fails.
+    /// * [`FramerError::WebSocket`] if the websocket is not open or the write buffer cannot fit a
+    ///   ping frame.
+    pub async fn ping<S>(&mut self, stream: &mut S) -> Result<(), FramerError<S::Error>>
+    where
+        S: Write,
+    {
+        send_unsent(&mut self.core, stream).await?;
+        let len = self.core.encode_keepalive_ping()?;
+        send(&mut self.core, stream, len).await
+    }
+
     /// Writes `frame_buf` to the stream.
     ///
     /// A text or binary payload that does not fit into the write buffer is sent in several
@@ -578,6 +594,36 @@ mod tests {
             framer.read(&mut stream, &mut frame_buf).await.unwrap(),
             ReadResult::Disconnected
         ));
+    }
+
+    #[tokio::test]
+    async fn keepalive_ping_awaits_its_pong() {
+        let (mut read_buf, mut write_buf, mut frame_buf) =
+            (vec![0; 256], vec![0; 256], vec![0; 256]);
+        let mut state = FramerState::new();
+        let mut ws_server = WebSocketServer::new_server();
+        ws_server.state = WebSocketState::Open;
+        let mut stream = OneBytePerReadStream {
+            read_buf: Vec::new(),
+            read_cursor: 0,
+            write_buf: Vec::new(),
+        };
+        let mut framer = Framer::new(&mut read_buf, &mut state, &mut write_buf, &mut ws_server);
+        framer.ping(&mut stream).await.unwrap();
+        assert_eq!(stream.write_buf[0], 0x89, "a ping frame");
+        let payload = stream.write_buf[2..].to_vec();
+
+        let mut ws_client = WebSocketClient::new_client(rand::rng());
+        let mut pong = vec![0; 64];
+        let len = ws_client
+            .write_frame(&payload, &mut pong, WebSocketOpCode::Pong, true)
+            .unwrap();
+        stream.read_buf = pong[..len].to_vec();
+        assert!(matches!(
+            framer.read(&mut stream, &mut frame_buf).await,
+            Ok(ReadResult::Pong(_))
+        ));
+        assert!(!state.awaiting_pong());
     }
 
     struct ScriptedStream {

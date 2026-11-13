@@ -237,6 +237,8 @@ pub struct FramerState {
     pub(crate) chunks: Option<ChunkProgress>,
     pub(crate) pending: Option<Pending>,
     pub(crate) writing: Option<WriteProgress>,
+    keepalive_pings: u32,
+    awaited_pong: Option<u32>,
 }
 
 // The bytes of a character that the last text chunk cut off; they start the next chunk.
@@ -267,6 +269,8 @@ impl FramerState {
             chunks: None,
             pending: None,
             writing: None,
+            keepalive_pings: 0,
+            awaited_pong: None,
         }
     }
 
@@ -281,6 +285,14 @@ impl FramerState {
                 progress.carry_len = 0;
             }
         }
+    }
+
+    /// Returns `true` from sending a keepalive ping until the pong that answers it arrives.
+    ///
+    /// Send keepalive pings with the `ping` method of a framer on a timer of your choice. If this
+    /// is still `true` when the timer fires again, the other party did not answer in time.
+    pub const fn awaiting_pong(&self) -> bool {
+        self.awaited_pong.is_some()
     }
 
     /// Number of pings, pongs and non-final data frames decoded on this connection so far.
@@ -424,6 +436,15 @@ where
         self.websocket
             .close(close_status, status_description, self.write_buf)
             .map_err(FramerError::WebSocket)
+    }
+
+    // The payload is a sequence number, so only the pong for the latest ping matches.
+    pub(crate) fn encode_keepalive_ping<E>(&mut self) -> Result<usize, FramerError<E>> {
+        let number = self.state.keepalive_pings.wrapping_add(1);
+        let len = self.encode_write(WebSocketSendMessageType::Ping, true, &number.to_be_bytes())?;
+        self.state.keepalive_pings = number;
+        self.state.awaited_pong = Some(number);
+        Ok(len)
     }
 
     pub(crate) fn encode_write<E>(
@@ -683,6 +704,12 @@ where
                 }
                 WebSocketReceiveMessageType::Pong => {
                     self.state.control_frames = self.state.control_frames.saturating_add(1);
+                    let number = frame_buf[payload.clone()]
+                        .try_into()
+                        .map(u32::from_be_bytes);
+                    if number.ok() == self.state.awaited_pong {
+                        self.state.awaited_pong = None;
+                    }
                     return Ok(Decoded::Message(Message::Pong(payload)));
                 }
             }
