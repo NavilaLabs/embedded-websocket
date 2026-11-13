@@ -12,6 +12,7 @@
 // support for websockets without using the standard library
 #![cfg_attr(not(feature = "std"), no_std)]
 #![cfg_attr(docsrs, feature(doc_cfg))]
+#![warn(missing_docs)]
 
 use core::{cmp, result, str};
 use heapless::{String, Vec};
@@ -19,7 +20,7 @@ use rand_core::Rng;
 use sha1::{Digest, Sha1};
 
 mod http;
-pub mod random;
+mod random;
 pub use self::http::{read_http_header, WebSocketContext};
 pub use self::random::EmptyRng;
 
@@ -201,24 +202,36 @@ pub enum WebSocketState {
 pub enum Error {
     /// Websocket frame has an invalid opcode
     InvalidOpCode,
+    /// A frame length cannot be decoded, a control frame is longer than 125 bytes, or a close
+    /// frame has a one byte payload
     InvalidFrameLength,
+    /// A close frame holds a status code that must not be sent (RFC 6455 section 7.4)
     InvalidCloseStatusCode,
+    /// The operation needs an open websocket
     WebSocketNotOpen,
+    /// The opening handshake is performed on a websocket that is already open
     WebsocketAlreadyOpen,
+    /// Text that must be UTF-8 is not, for example the reason of a close frame
     Utf8Error,
+    /// An error that cannot be described more precisely
     Unknown,
     /// The HTTP header of the opening handshake is not valid HTTP/1.1
     HttpHeaderInvalid,
-    HttpHeaderNoPath,
+    /// The HTTP header of the opening handshake is not complete yet
     HttpHeaderIncomplete,
+    /// The output buffer is too small for the frame or HTTP header
     WriteToBufferTooSmall,
+    /// The input does not contain a whole frame header yet
     ReadFrameIncomplete,
+    /// The server answered the opening handshake with a status code other than 101
     HttpResponseCodeInvalid(Option<u16>),
+    /// The `Sec-WebSocket-Accept` header of the server is missing or does not match the key
     AcceptStringInvalid,
     /// The sub protocol of the opening handshake is not one the client offered
     SubProtocolNotOffered,
+    /// A conversion that cannot fail failed
     ConvertInfallible,
-    RandCore,
+    /// A continuation frame arrives without a fragmented message to continue
     UnexpectedContinuationFrame,
     /// A frame sets reserved bits although no extension was negotiated
     ReservedBitsSet,
@@ -336,11 +349,12 @@ pub type WebSocketServer = WebSocket<EmptyRng, Server>;
 /// Used to return a sized type from `WebSocketClient::new_client()`
 pub type WebSocketClient<T> = WebSocket<T, Client>;
 
-// Simple Typestate pattern for preventing panics and allowing reuse of underlying
-// read/read_frame/etc..
+/// Marks a [`WebSocket`] as the server side of a connection.
 pub enum Server {}
+/// Marks a [`WebSocket`] as the client side of a connection.
 pub enum Client {}
 
+/// The side of a connection a [`WebSocket`] is on: [`Server`] or [`Client`].
 pub trait WebSocketType {}
 impl WebSocketType for Server {}
 impl WebSocketType for Client {}
@@ -354,6 +368,7 @@ where
     rng: T,
     continuation_frame_op_code: Option<WebSocketOpCode>,
     is_write_continuation: bool,
+    /// The state of the connection. The opening and closing handshakes update it.
     pub state: WebSocketState,
     continuation_read: Option<ContinuationRead>,
     marker: core::marker::PhantomData<S>,
