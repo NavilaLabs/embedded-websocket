@@ -190,7 +190,5 @@ fn a_write_buffer_one_byte_short_fails_on_the_largest_handshake_response() {
     ));
 }
 
-#[test]
-fn the_minimum_write_buffer_fits_the_largest_control_frame() {
-    assert!(MIN_READ_BUF_LEN <= MIN_WRITE_BUF_LEN);
-}
+// The framer answers the largest ping with a pong of the same length.
+const _: () = assert!(MIN_READ_BUF_LEN <= MIN_WRITE_BUF_LEN);
