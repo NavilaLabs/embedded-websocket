@@ -6,8 +6,6 @@
 //!
 //! Any stream that implements [`embedded_io::Read`] and [`embedded_io::Write`] works.
 
-use core::ops::Range;
-
 use embedded_io::{Read, Write};
 use rand_core::Rng;
 
@@ -67,7 +65,6 @@ where
     TWebSocketType: WebSocketType,
 {
     core: FramerCore<'a, TRng, TWebSocketType>,
-    unsent: &'a mut Range<usize>,
 }
 
 impl<'a, TRng> Framer<'a, TRng, crate::Client>
@@ -174,28 +171,14 @@ where
         write_buf: &'a mut [u8],
         websocket: &'a mut WebSocket<TRng, TWebSocketType>,
     ) -> Self {
-        let FramerState {
-            read_cursor,
-            frame_cursor,
-            unsent,
-            control_frames,
-        } = state;
         Self {
-            core: FramerCore::new(
-                read_buf,
-                read_cursor,
-                frame_cursor,
-                control_frames,
-                write_buf,
-                websocket,
-            ),
-            unsent,
+            core: FramerCore::new(read_buf, state, write_buf, websocket),
         }
     }
 
     /// Returns the state of the websocket.
     pub fn state(&self) -> WebSocketState {
-        self.core.state()
+        self.core.websocket_state()
     }
 
     /// Initiates a close handshake.
@@ -304,19 +287,18 @@ where
     }
 
     fn send<S: Write>(&mut self, stream: &mut S, len: usize) -> Result<(), FramerError<S::Error>> {
-        *self.unsent = 0..len;
+        self.core.queue_unsent(len);
         self.send_unsent(stream)
     }
 
     fn send_unsent<S: Write>(&mut self, stream: &mut S) -> Result<(), FramerError<S::Error>> {
-        if self.unsent.start == self.unsent.end {
+        if self.core.unsent().is_empty() {
             return Ok(());
         }
-        while self.unsent.start < self.unsent.end {
-            let unsent = &self.core.written(self.unsent.end)[self.unsent.start..];
-            match stream.write(unsent).map_err(FramerError::Io)? {
+        while !self.core.unsent().is_empty() {
+            match stream.write(self.core.unsent()).map_err(FramerError::Io)? {
                 0 => panic!("write() returned Ok(0)"),
-                written => self.unsent.start += written,
+                written => self.core.mark_sent(written),
             }
         }
         stream.flush().map_err(FramerError::Io)

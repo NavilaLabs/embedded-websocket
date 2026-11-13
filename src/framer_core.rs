@@ -109,13 +109,11 @@ where
     TWebSocketType: WebSocketType,
 {
     read_buf: &'a mut [u8],
-    // Undecoded bytes always start at index 0, so a framer recreated with the same `read_buf` and
-    // `read_len` continues where the previous one stopped.
-    read_len: &'a mut usize,
+    // Undecoded bytes always start at index 0 of `read_buf`, so a framer recreated with the same
+    // `read_buf` and `state` continues where the previous one stopped.
+    state: &'a mut FramerState,
     write_buf: &'a mut [u8],
-    frame_cursor: &'a mut usize,
     websocket: &'a mut WebSocket<TRng, TWebSocketType>,
-    control_frames: &'a mut u64,
 }
 
 impl<'a, TRng> FramerCore<'a, TRng, crate::Client>
@@ -126,7 +124,7 @@ where
         &mut self,
         websocket_options: &WebSocketOptions,
     ) -> Result<(usize, WebSocketKey), FramerError<E>> {
-        *self.read_len = 0;
+        self.state.read_cursor = 0;
         self.websocket
             .client_connect(websocket_options, self.write_buf)
             .map_err(FramerError::WebSocket)
@@ -140,7 +138,7 @@ where
         match self.websocket.client_accept(
             web_socket_key,
             sub_protocols,
-            &self.read_buf[..*self.read_len],
+            &self.read_buf[..self.state.read_cursor],
         ) {
             Ok((len, sub_protocol)) => {
                 self.consume(len);
@@ -152,10 +150,10 @@ where
     }
 
     pub(crate) fn connect_read_space<E>(&mut self) -> Result<&mut [u8], FramerError<E>> {
-        if *self.read_len == self.read_buf.len() {
+        if self.state.read_cursor == self.read_buf.len() {
             return Err(FramerError::WebSocket(crate::Error::HttpHeaderIncomplete));
         }
-        Ok(&mut self.read_buf[*self.read_len..])
+        Ok(&mut self.read_buf[self.state.read_cursor..])
     }
 }
 
@@ -193,28 +191,32 @@ where
 {
     pub(crate) fn new(
         read_buf: &'a mut [u8],
-        read_len: &'a mut usize,
-        frame_cursor: &'a mut usize,
-        control_frames: &'a mut u64,
+        state: &'a mut FramerState,
         write_buf: &'a mut [u8],
         websocket: &'a mut WebSocket<TRng, TWebSocketType>,
     ) -> Self {
         Self {
             read_buf,
-            read_len,
+            state,
             write_buf,
-            frame_cursor,
             websocket,
-            control_frames,
         }
     }
 
-    pub(crate) fn state(&self) -> WebSocketState {
-        self.websocket.state
+    pub(crate) fn queue_unsent(&mut self, len: usize) {
+        self.state.unsent = 0..len;
     }
 
-    pub(crate) fn written(&self, len: usize) -> &[u8] {
-        &self.write_buf[..len]
+    pub(crate) fn unsent(&self) -> &[u8] {
+        &self.write_buf[self.state.unsent.clone()]
+    }
+
+    pub(crate) fn mark_sent(&mut self, len: usize) {
+        self.state.unsent.start += len;
+    }
+
+    pub(crate) fn websocket_state(&self) -> WebSocketState {
+        self.websocket.state
     }
 
     pub(crate) fn encode_close<E>(
@@ -239,14 +241,14 @@ where
     }
 
     pub(crate) fn read_space<E>(&mut self) -> Result<&mut [u8], FramerError<E>> {
-        if *self.read_len == self.read_buf.len() {
+        if self.state.read_cursor == self.read_buf.len() {
             return Err(FramerError::FrameTooLarge(self.read_buf.len()));
         }
-        Ok(&mut self.read_buf[*self.read_len..])
+        Ok(&mut self.read_buf[self.state.read_cursor..])
     }
 
     pub(crate) fn commit_read(&mut self, len: usize) {
-        *self.read_len += len;
+        self.state.read_cursor += len;
     }
 
     pub(crate) fn decode<E>(&mut self, frame_buf: &mut [u8]) -> Result<Decoded<E>, FramerError<E>> {
@@ -279,7 +281,7 @@ where
 
     fn decode_frames<E>(&mut self, frame_buf: &mut [u8]) -> Result<Decoded<E>, FramerError<E>> {
         loop {
-            let buffered = &self.read_buf[..*self.read_len];
+            let buffered = &self.read_buf[..self.state.read_cursor];
             if buffered.is_empty() {
                 return Ok(Decoded::NeedMoreData);
             }
@@ -290,7 +292,7 @@ where
                 Ok(Some(len)) if len.total > buffered.len() => {
                     return self.need_more_data();
                 }
-                Ok(Some(len)) if *self.frame_cursor + len.payload > frame_buf.len() => {
+                Ok(Some(len)) if self.state.frame_cursor + len.payload > frame_buf.len() => {
                     return Err(FramerError::FrameTooLarge(frame_buf.len()));
                 }
                 Ok(_) => {}
@@ -298,7 +300,7 @@ where
                 Err(e) => return Err(FramerError::WebSocket(e)),
             }
 
-            if *self.frame_cursor >= frame_buf.len() {
+            if self.state.frame_cursor >= frame_buf.len() {
                 return Err(FramerError::FrameTooLarge(frame_buf.len()));
             }
 
@@ -307,7 +309,7 @@ where
             let starts_new_frame = self.websocket.continuation_read.is_none();
             let ws_result = match self
                 .websocket
-                .read(buffered, &mut frame_buf[*self.frame_cursor..])
+                .read(buffered, &mut frame_buf[self.state.frame_cursor..])
             {
                 Ok(ws_result) => ws_result,
                 Err(crate::Error::ReadFrameIncomplete) => return self.need_more_data(),
@@ -315,19 +317,19 @@ where
             };
             self.consume(ws_result.len_from);
 
-            let payload = *self.frame_cursor..*self.frame_cursor + ws_result.len_to;
+            let payload = self.state.frame_cursor..self.state.frame_cursor + ws_result.len_to;
             match ws_result.message_type {
                 WebSocketReceiveMessageType::Binary | WebSocketReceiveMessageType::Text => {
-                    *self.frame_cursor = payload.end;
+                    self.state.frame_cursor = payload.end;
                     let header_is_final = match &self.websocket.continuation_read {
                         Some(unfinished) => unfinished.is_fin_bit_set,
                         None => ws_result.end_of_message,
                     };
                     if starts_new_frame && !header_is_final {
-                        *self.control_frames = self.control_frames.saturating_add(1);
+                        self.state.control_frames = self.state.control_frames.saturating_add(1);
                     }
                     if ws_result.end_of_message {
-                        *self.frame_cursor = 0;
+                        self.state.frame_cursor = 0;
                         return Ok(Decoded::Message(
                             if ws_result.message_type == WebSocketReceiveMessageType::Binary {
                                 Message::Binary(payload.end)
@@ -351,7 +353,7 @@ where
                     return Ok(Decoded::Message(Message::Closed));
                 }
                 WebSocketReceiveMessageType::Ping => {
-                    *self.control_frames = self.control_frames.saturating_add(1);
+                    self.state.control_frames = self.state.control_frames.saturating_add(1);
                     let len = self.encode_write(
                         WebSocketSendMessageType::Pong,
                         true,
@@ -360,7 +362,7 @@ where
                     return Ok(Decoded::SendThenContinue(len));
                 }
                 WebSocketReceiveMessageType::Pong => {
-                    *self.control_frames = self.control_frames.saturating_add(1);
+                    self.state.control_frames = self.state.control_frames.saturating_add(1);
                     return Ok(Decoded::Message(Message::Pong(payload)));
                 }
             }
@@ -368,7 +370,7 @@ where
     }
 
     fn need_more_data<E>(&self) -> Result<Decoded<E>, FramerError<E>> {
-        if *self.read_len == self.read_buf.len() {
+        if self.state.read_cursor == self.read_buf.len() {
             Err(FramerError::FrameTooLarge(self.read_buf.len()))
         } else {
             Ok(Decoded::NeedMoreData)
@@ -376,7 +378,7 @@ where
     }
 
     fn consume(&mut self, len: usize) {
-        self.read_buf.copy_within(len..*self.read_len, 0);
-        *self.read_len -= len;
+        self.read_buf.copy_within(len..self.state.read_cursor, 0);
+        self.state.read_cursor -= len;
     }
 }
