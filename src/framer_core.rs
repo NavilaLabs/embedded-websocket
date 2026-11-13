@@ -30,6 +30,57 @@ pub enum ReadResult<'a> {
     Disconnected,
 }
 
+/// A piece of a websocket message read from the stream.
+///
+/// Text and binary messages arrive as one or more chunks of the same type; the last one has
+/// `is_last` set. Pong, close and disconnect events arrive whole, as in [`ReadResult`].
+pub enum ReadChunk<'a> {
+    /// A chunk of a binary message.
+    Binary {
+        /// The bytes of this chunk.
+        chunk: &'a [u8],
+        /// This chunk ends the message.
+        is_last: bool,
+    },
+    /// A chunk of a text message. Chunks end at character boundaries, so every chunk is valid
+    /// UTF-8 by itself.
+    Text {
+        /// The characters of this chunk.
+        chunk: &'a str,
+        /// This chunk ends the message.
+        is_last: bool,
+    },
+    /// A pong message with its payload.
+    Pong(&'a [u8]),
+    /// The close handshake is complete, see [`ReadResult::Closed`].
+    Closed {
+        /// The status code of the other party.
+        status: WebSocketCloseStatusCode,
+        /// The reason the other party gave.
+        reason: &'a str,
+    },
+    /// The stream ended before the close handshake was complete.
+    Disconnected,
+}
+
+impl<'a> From<ReadResult<'a>> for ReadChunk<'a> {
+    fn from(result: ReadResult<'a>) -> Self {
+        match result {
+            ReadResult::Binary(chunk) => ReadChunk::Binary {
+                chunk,
+                is_last: true,
+            },
+            ReadResult::Text(chunk) => ReadChunk::Text {
+                chunk,
+                is_last: true,
+            },
+            ReadResult::Pong(payload) => ReadChunk::Pong(payload),
+            ReadResult::Closed { status, reason } => ReadChunk::Closed { status, reason },
+            ReadResult::Disconnected => ReadChunk::Disconnected,
+        }
+    }
+}
+
 /// An error of a framer operation.
 #[derive(Debug)]
 pub enum FramerError<E> {
@@ -82,25 +133,56 @@ impl<E> From<Failure> for FramerError<E> {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ReadMode {
+    WholeMessages,
+    Chunks,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Message {
     Binary(usize),
     Text(usize),
+    // Chunks that do not end their message, only decoded in `ReadMode::Chunks`.
+    BinaryChunk(usize),
+    TextChunk(usize),
     Pong(Range<usize>),
     Closed(Range<usize>),
+    Disconnected,
 }
 
 impl Message {
+    pub(crate) fn into_read_chunk<E>(
+        self,
+        frame_buf: &[u8],
+    ) -> Result<ReadChunk<'_>, FramerError<E>> {
+        Ok(match self {
+            Message::BinaryChunk(len) => ReadChunk::Binary {
+                chunk: &frame_buf[..len],
+                is_last: false,
+            },
+            Message::TextChunk(len) => ReadChunk::Text {
+                chunk: core::str::from_utf8(&frame_buf[..len]).map_err(FramerError::Utf8)?,
+                is_last: false,
+            },
+            whole => whole.into_read_result(frame_buf)?.into(),
+        })
+    }
+
     pub(crate) fn into_read_result<E>(
         self,
         frame_buf: &[u8],
     ) -> Result<ReadResult<'_>, FramerError<E>> {
         Ok(match self {
+            Message::BinaryChunk(_) | Message::TextChunk(_) => {
+                return Err(FramerError::WebSocket(crate::Error::Unknown))
+            }
             Message::Binary(len) => ReadResult::Binary(&frame_buf[..len]),
             Message::Text(len) => ReadResult::Text(
                 core::str::from_utf8(&frame_buf[..len]).map_err(FramerError::Utf8)?,
             ),
             Message::Pong(range) => ReadResult::Pong(&frame_buf[range]),
+            Message::Disconnected => ReadResult::Disconnected,
             Message::Closed(range) => match &frame_buf[range] {
                 [high, low, reason @ ..] => ReadResult::Closed {
                     status: WebSocketCloseStatusCode::from_u16(u16::from_be_bytes([*high, *low])),
@@ -147,8 +229,18 @@ pub struct FramerState {
     pub(crate) control_frames: u64,
     // Bytes at the start of the current text message that are known to be valid UTF-8.
     pub(crate) text_checked: usize,
+    pub(crate) reading_text: bool,
+    // Set once a chunk of the current message was returned, so only chunked reads may continue it.
+    pub(crate) chunks: Option<ChunkProgress>,
     pub(crate) pending: Option<Pending>,
     pub(crate) writing: Option<WriteProgress>,
+}
+
+// The bytes of a character that the last text chunk cut off; they start the next chunk.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub(crate) struct ChunkProgress {
+    carry: [u8; 3],
+    carry_len: usize,
 }
 
 // How much of a message a failed write already queued, so writing it again continues there.
@@ -168,8 +260,23 @@ impl FramerState {
             unsent: 0..0,
             control_frames: 0,
             text_checked: 0,
+            reading_text: false,
+            chunks: None,
             pending: None,
             writing: None,
+        }
+    }
+
+    // Puts the bytes a text chunk cut off at the start of `frame_buf` before more of the message
+    // follows them.
+    fn restore_carry(&mut self, frame_buf: &mut [u8]) {
+        if let Some(progress) = &mut self.chunks {
+            if progress.carry_len > 0 {
+                frame_buf[..progress.carry_len]
+                    .copy_from_slice(&progress.carry[..progress.carry_len]);
+                self.frame_cursor = progress.carry_len;
+                progress.carry_len = 0;
+            }
         }
     }
 
@@ -393,8 +500,15 @@ where
         self.state.read_cursor += len;
     }
 
-    pub(crate) fn decode<E>(&mut self, frame_buf: &mut [u8]) -> Result<Decoded, FramerError<E>> {
-        let error = match self.decode_frames(frame_buf) {
+    pub(crate) fn decode<E>(
+        &mut self,
+        frame_buf: &mut [u8],
+        mode: ReadMode,
+    ) -> Result<Decoded, FramerError<E>> {
+        if mode == ReadMode::WholeMessages && self.state.chunks.is_some() {
+            return Err(FramerError::WebSocket(crate::Error::UnfinishedRead));
+        }
+        let error = match self.decode_frames(frame_buf, mode) {
             Err(error) => error,
             decoded => return decoded,
         };
@@ -440,19 +554,25 @@ where
     }
 
     /// Returns the result a read kept while it sent bytes.
-    pub(crate) fn finish<'b, E>(
-        &mut self,
-        frame_buf: &'b [u8],
-    ) -> Result<ReadResult<'b>, FramerError<E>> {
+    pub(crate) fn finish<E>(&mut self) -> Result<Message, FramerError<E>> {
         match self.state.pending.take() {
-            Some(Pending::Message(message)) => message.into_read_result(frame_buf),
+            Some(Pending::Message(message)) => Ok(message),
             Some(Pending::Failed(failure)) => Err(failure.into()),
             None => Err(FramerError::WebSocket(crate::Error::Unknown)),
         }
     }
 
-    fn decode_frames<E>(&mut self, frame_buf: &mut [u8]) -> Result<Decoded, FramerError<E>> {
+    fn decode_frames<E>(
+        &mut self,
+        frame_buf: &mut [u8],
+        mode: ReadMode,
+    ) -> Result<Decoded, FramerError<E>> {
         loop {
+            if mode == ReadMode::Chunks && self.state.frame_cursor == frame_buf.len() {
+                if let Some(chunk) = self.take_chunk(frame_buf)? {
+                    return Ok(Decoded::Message(chunk));
+                }
+            }
             let buffered = &self.read_buf[..self.state.read_cursor];
             if buffered.is_empty() {
                 return Ok(Decoded::NeedMoreData);
@@ -465,9 +585,17 @@ where
                     return self.need_more_data();
                 }
                 Ok(Some(len)) if self.state.frame_cursor + len.payload > frame_buf.len() => {
-                    return Err(FramerError::FrameTooLarge(frame_buf.len()));
+                    if mode == ReadMode::WholeMessages || self.state.frame_cursor == 0 {
+                        return Err(FramerError::FrameTooLarge(frame_buf.len()));
+                    }
+                    // the control frame payload fits once the message bytes before it are returned
+                    match self.take_chunk(frame_buf)? {
+                        Some(chunk) => return Ok(Decoded::Message(chunk)),
+                        None => continue,
+                    }
                 }
-                Ok(_) => {}
+                Ok(Some(_)) => {}
+                Ok(None) => self.state.restore_carry(frame_buf),
                 Err(crate::Error::ReadFrameIncomplete) => return self.need_more_data(),
                 Err(e) => return Err(FramerError::WebSocket(e)),
             }
@@ -501,12 +629,14 @@ where
                         self.state.control_frames = self.state.control_frames.saturating_add(1);
                     }
                     let is_text = ws_result.message_type == WebSocketReceiveMessageType::Text;
+                    self.state.reading_text = is_text;
                     if is_text {
                         self.check_text(&frame_buf[..payload.end], ws_result.end_of_message)?;
                     }
                     if ws_result.end_of_message {
                         self.state.frame_cursor = 0;
                         self.state.text_checked = 0;
+                        self.state.chunks = None;
                         return Ok(Decoded::Message(if is_text {
                             Message::Text(payload.end)
                         } else {
@@ -515,6 +645,7 @@ where
                     }
                 }
                 WebSocketReceiveMessageType::CloseMustReply => {
+                    self.state.chunks = None;
                     let len = self.encode_write(
                         WebSocketSendMessageType::CloseReply,
                         true,
@@ -524,6 +655,7 @@ where
                     return Ok(Decoded::SendThenFinish(len));
                 }
                 WebSocketReceiveMessageType::CloseCompleted => {
+                    self.state.chunks = None;
                     return Ok(Decoded::Message(Message::Closed(payload)));
                 }
                 WebSocketReceiveMessageType::Ping => {
@@ -541,6 +673,33 @@ where
                 }
             }
         }
+    }
+
+    // Hands out the message bytes in `frame_buf` and frees it for the rest of the message. Returns
+    // `None` if the bytes are only the start of a character, which is kept for the next chunk.
+    fn take_chunk<E>(&mut self, frame_buf: &[u8]) -> Result<Option<Message>, FramerError<E>> {
+        let len = self.state.frame_cursor;
+        let chunk_len = if self.state.reading_text {
+            self.state.text_checked
+        } else {
+            len
+        };
+        if chunk_len == 0 && len == frame_buf.len() {
+            return Err(FramerError::FrameTooLarge(frame_buf.len()));
+        }
+        let mut progress = ChunkProgress {
+            carry_len: len - chunk_len,
+            ..ChunkProgress::default()
+        };
+        progress.carry[..progress.carry_len].copy_from_slice(&frame_buf[chunk_len..len]);
+        self.state.chunks = Some(progress);
+        self.state.frame_cursor = 0;
+        self.state.text_checked = 0;
+        Ok(match chunk_len {
+            0 => None,
+            _ if self.state.reading_text => Some(Message::TextChunk(chunk_len)),
+            _ => Some(Message::BinaryChunk(chunk_len)),
+        })
     }
 
     fn need_more_data<E>(&self) -> Result<Decoded, FramerError<E>> {

@@ -4,8 +4,9 @@
 use std::collections::VecDeque;
 
 use embedded_io_websocket::{
-    blocking, FramerError, FramerState, ReadResult, WebSocketClient, WebSocketCloseStatusCode,
-    WebSocketReceiveMessageType, WebSocketSendMessageType, WebSocketServer, WebSocketState,
+    blocking, FramerError, FramerState, ReadChunk, ReadResult, WebSocketClient,
+    WebSocketCloseStatusCode, WebSocketReceiveMessageType, WebSocketSendMessageType,
+    WebSocketServer, WebSocketState,
 };
 use proptest::prelude::*;
 
@@ -145,6 +146,10 @@ fn fragment() -> impl Strategy<Value = Fragment> {
             len_percent,
             ping_before,
         })
+}
+
+fn frame_buf_len() -> impl Strategy<Value = usize> {
+    125usize..700
 }
 
 fn conversation() -> impl Strategy<Value = Conversation> {
@@ -293,6 +298,62 @@ fn received(result: ReadResult<'_>) -> Result<Message, End> {
     }
 }
 
+/// Joins the chunks of `read_chunk` into messages and checks that each chunk keeps its promises.
+struct Assembler {
+    frame_buf_len: usize,
+    partial: Option<Message>,
+}
+
+impl Assembler {
+    fn new(frame_buf_len: usize) -> Self {
+        Self {
+            frame_buf_len,
+            partial: None,
+        }
+    }
+
+    fn add(&mut self, chunk: ReadChunk<'_>) -> Option<Result<Message, End>> {
+        let (piece, is_last) = match chunk {
+            ReadChunk::Text { chunk, is_last } => (Message::Text(chunk.to_owned()), is_last),
+            ReadChunk::Binary { chunk, is_last } => (Message::Binary(chunk.to_vec()), is_last),
+            ReadChunk::Pong(_) => panic!("the client sends no pongs"),
+            ReadChunk::Closed { status, reason } => {
+                assert_eq!(self.partial, None, "closed inside a message");
+                return Some(Err(End::Closed(status_code(status), reason.to_owned())));
+            }
+            ReadChunk::Disconnected => return Some(Err(End::Disconnected)),
+        };
+        let len = piece.payload().len();
+        assert!(len <= self.frame_buf_len);
+        if !is_last {
+            // a chunk only ends early when a control frame of at most 125 bytes needs the space
+            // and a cut off character of at most 3 bytes moves to the next chunk
+            assert!(
+                len + 128 > self.frame_buf_len,
+                "chunk of {len} bytes too short"
+            );
+        }
+        let joined = match (self.partial.take(), piece) {
+            (None, piece) => piece,
+            (Some(Message::Text(mut text)), Message::Text(piece)) => {
+                text.push_str(&piece);
+                Message::Text(text)
+            }
+            (Some(Message::Binary(mut binary)), Message::Binary(piece)) => {
+                binary.extend_from_slice(&piece);
+                Message::Binary(binary)
+            }
+            (partial, piece) => panic!("{piece:?} continues {partial:?}"),
+        };
+        if is_last {
+            Some(Ok(joined))
+        } else {
+            self.partial = Some(joined);
+            None
+        }
+    }
+}
+
 fn status_code(status: WebSocketCloseStatusCode) -> u16 {
     match status {
         WebSocketCloseStatusCode::NormalClosure => 1000,
@@ -411,6 +472,40 @@ proptest! {
     }
 
     #[test]
+    fn blocking_framer_reads_chunks_over_interrupted_io(
+        conversation in conversation(),
+        frame_buf_len in frame_buf_len(),
+    ) {
+        let mut stream = conversation.stream();
+        let mut read_buf = vec![0; conversation.read_buf_len];
+        let mut write_buf = vec![0; 256];
+        let mut frame_buf = vec![0; frame_buf_len];
+        let mut state = FramerState::new();
+        let mut ws_server = WebSocketServer::new_server();
+        ws_server.state = WebSocketState::Open;
+
+        let mut assembler = Assembler::new(frame_buf_len);
+        let mut messages = Vec::new();
+        let end = loop {
+            let mut framer =
+                blocking::Framer::new(&mut read_buf, &mut state, &mut write_buf, &mut ws_server);
+            match framer.read_chunk(&mut stream, &mut frame_buf) {
+                Ok(chunk) => match assembler.add(chunk) {
+                    Some(Ok(message)) => messages.push(message),
+                    Some(Err(end)) => break end,
+                    None => {}
+                },
+                Err(FramerError::Io(Interrupted)) => {}
+                Err(error) => panic!("read failed: {error:?}"),
+            }
+        };
+
+        prop_assert_eq!(messages, expected(&conversation));
+        prop_assert_eq!(end, conversation.end());
+        prop_assert_eq!(stream.pongs(), conversation.pings());
+    }
+
+    #[test]
     fn blocking_framer_writes_large_messages_over_interrupted_io(outgoing in outgoing()) {
         let mut stream = outgoing.stream();
         let mut read_buf = vec![0; 256];
@@ -508,6 +603,40 @@ mod asynch {
                     Poll::Ready(Ok(result)) => match received(result) {
                         Ok(message) => messages.push(message),
                         Err(end) => break end,
+                    },
+                    Poll::Ready(Err(error)) => panic!("read failed: {error:?}"),
+                    Poll::Pending => {}
+                }
+            };
+
+            prop_assert_eq!(messages, expected(&conversation));
+            prop_assert_eq!(end, conversation.end());
+            prop_assert_eq!(stream.pongs(), conversation.pings());
+        }
+
+        #[test]
+        fn async_framer_reads_chunks_over_cancelled_io(
+            conversation in conversation(),
+            frame_buf_len in frame_buf_len(),
+        ) {
+            let mut stream = conversation.stream();
+            let mut read_buf = vec![0; conversation.read_buf_len];
+            let mut write_buf = vec![0; 256];
+            let mut frame_buf = vec![0; frame_buf_len];
+            let mut state = FramerState::new();
+            let mut ws_server = WebSocketServer::new_server();
+            ws_server.state = WebSocketState::Open;
+
+            let mut assembler = Assembler::new(frame_buf_len);
+            let mut messages = Vec::new();
+            let end = loop {
+                let mut framer =
+                    Framer::new(&mut read_buf, &mut state, &mut write_buf, &mut ws_server);
+                match poll_once(framer.read_chunk(&mut stream, &mut frame_buf)) {
+                    Poll::Ready(Ok(chunk)) => match assembler.add(chunk) {
+                        Some(Ok(message)) => messages.push(message),
+                        Some(Err(end)) => break end,
+                        None => {}
                     },
                     Poll::Ready(Err(error)) => panic!("read failed: {error:?}"),
                     Poll::Pending => {}

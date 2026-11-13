@@ -27,8 +27,9 @@ Both have the same API:
 
 * `connect` and `accept` perform the opening handshake of the client and the server.
 * `read` returns whole text and binary messages, answers pings and completes a close handshake the other party starts. It returns `Closed` with the status and reason of the other party when the close handshake is complete, and `Disconnected` when the stream ended before. If the other party violates the protocol, the framer closes the connection with the matching status code and returns the error.
+* `read_chunk` reads messages larger than `frame_buf` in chunks of up to `frame_buf` bytes, for example to stream a firmware image to flash. Text chunks end at character boundaries, so each one is a valid `&str`. Once a chunk of a message was returned, read the rest of it with `read_chunk` as well.
 * `write` splits messages that do not fit into the write buffer into several frames.
-* A `read` or `write` that fails, or is cancelled in the async framer, can be called again to continue where it stopped. Call `write` again with the same message before writing another one.
+* A `read`, `read_chunk` or `write` that fails, or is cancelled in the async framer, can be called again to continue where it stopped. Call `write` again with the same message before writing another one.
 
 To use a `std` or `tokio` stream, wrap it with `FromStd` or `FromTokio` from [embedded-io-adapters](https://crates.io/crates/embedded-io-adapters).
 
@@ -37,7 +38,7 @@ To use a `std` or `tokio` stream, wrap it with `FromStd` or `FromTokio` from [em
 A framer works on three buffers you provide, and a `FramerState` that you keep per connection:
 
 * `read_buf` holds received bytes. It must fit the HTTP header the other side sends in the opening handshake (a browser request is often 300 to 600 bytes, more with cookies) and a whole control frame (up to 131 bytes). Text and binary messages can be larger, they are moved to `frame_buf` piece by piece.
-* `frame_buf` receives a whole message, so it must fit the largest message you accept, and at least 125 bytes for control frame payloads. Larger messages fail the connection with status 1009.
+* `frame_buf` receives a whole message, so it must fit the largest message you accept, and at least 125 bytes for control frame payloads. Larger messages fail the connection with status 1009 when read with `read`; `read_chunk` returns them in pieces instead.
 * `write_buf` holds what the framer sends. It must fit the HTTP header of your side of the opening handshake (about 130 bytes for a server, 150 bytes plus path, host, origin and extra headers for a client) and a whole control frame (up to 131 bytes), because the framer answers pings by itself. Text and binary messages larger than it are sent in several frames.
 
 `MIN_READ_BUF_LEN`, `MIN_FRAME_BUF_LEN` and `MIN_WRITE_BUF_LEN` hold the minimum for everything except the HTTP headers above, for example to check buffer sizes at compile time. Buffer sizes are not checked when a framer is created: a buffer that is too small fails the operation that needs the space. 1 KiB each is a safe start.

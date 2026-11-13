@@ -11,11 +11,11 @@ use embedded_io_async::{Read, Write};
 use rand_core::Rng;
 
 use crate::{
-    framer_core::{Answer, Decoded, FramerCore},
+    framer_core::{Answer, Decoded, FramerCore, Message, ReadMode},
     request::BAD_REQUEST,
-    Decision, FramerError, FramerState, ReadResult, Request, WebSocket, WebSocketCloseStatusCode,
-    WebSocketOptions, WebSocketSendMessageType, WebSocketState, WebSocketSubProtocol,
-    WebSocketType,
+    Decision, FramerError, FramerState, ReadChunk, ReadResult, Request, WebSocket,
+    WebSocketCloseStatusCode, WebSocketOptions, WebSocketSendMessageType, WebSocketState,
+    WebSocketSubProtocol, WebSocketType,
 };
 
 /// Reads and writes whole websocket messages over a async stream.
@@ -337,19 +337,62 @@ where
     where
         S: Read + Write,
     {
+        self.read_message(stream, frame_buf, ReadMode::WholeMessages)
+            .await?
+            .into_read_result(frame_buf)
+    }
+
+    /// Reads from the stream until the next chunk of a message arrived, so messages larger than
+    /// `frame_buf` can be received.
+    ///
+    /// A chunk fills `frame_buf` unless it ends its message or a control frame needs the space.
+    /// Text chunks end at character boundaries; the bytes of a character cut off at the end of
+    /// `frame_buf` start the next chunk. Pings and close handshakes are handled as in
+    /// [`Framer::read`].
+    ///
+    /// Pass the same `frame_buf` to every call. Once a chunk of a message was returned, read the
+    /// rest of that message with this method too.
+    ///
+    /// # Errors
+    ///
+    /// The errors of [`Framer::read`], except that a message larger than `frame_buf` is not one.
+    /// [`FramerError::FrameTooLarge`] only reports a frame header or control frame that does not
+    /// fit, or a `frame_buf` smaller than a single character.
+    pub async fn read_chunk<'b, S>(
+        &mut self,
+        stream: &mut S,
+        frame_buf: &'b mut [u8],
+    ) -> Result<ReadChunk<'b>, FramerError<S::Error>>
+    where
+        S: Read + Write,
+    {
+        self.read_message(stream, frame_buf, ReadMode::Chunks)
+            .await?
+            .into_read_chunk(frame_buf)
+    }
+
+    async fn read_message<S>(
+        &mut self,
+        stream: &mut S,
+        frame_buf: &mut [u8],
+        mode: ReadMode,
+    ) -> Result<Message, FramerError<S::Error>>
+    where
+        S: Read + Write,
+    {
         self.send_unsent(stream).await?;
         if self.core.has_pending() {
-            return self.core.finish(frame_buf);
+            return self.core.finish();
         }
         loop {
-            match self.core.decode(frame_buf)? {
+            match self.core.decode(frame_buf, mode)? {
                 Decoded::NeedMoreData => {
                     let len = stream
                         .read(self.core.read_space()?)
                         .await
                         .map_err(FramerError::Io)?;
                     if len == 0 {
-                        return Ok(ReadResult::Disconnected);
+                        return Ok(Message::Disconnected);
                     }
                     self.core.commit_read(len);
                 }
@@ -358,9 +401,9 @@ where
                 }
                 Decoded::SendThenFinish(len) => {
                     self.send(stream, len).await?;
-                    return self.core.finish(frame_buf);
+                    return self.core.finish();
                 }
-                Decoded::Message(message) => return message.into_read_result(frame_buf),
+                Decoded::Message(message) => return Ok(message),
             }
         }
     }

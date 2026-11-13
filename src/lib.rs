@@ -11,6 +11,7 @@
 //! * `read` returns whole text and binary messages, answers pings and completes a close
 //!   handshake the other party starts. If the other party violates the protocol, the framer
 //!   closes the connection with the matching status code.
+//! * `read_chunk` returns messages larger than the frame buffer in chunks, see [`ReadChunk`].
 //! * `write` splits messages that do not fit into the write buffer into several frames.
 //!
 //! A read or write that fails, or is cancelled in the async framer, can be called again with a
@@ -78,7 +79,8 @@ mod framer_core;
 mod head;
 mod request;
 pub use self::framer_core::{
-    FramerError, FramerState, ReadResult, MIN_FRAME_BUF_LEN, MIN_READ_BUF_LEN, MIN_WRITE_BUF_LEN,
+    FramerError, FramerState, ReadChunk, ReadResult, MIN_FRAME_BUF_LEN, MIN_READ_BUF_LEN,
+    MIN_WRITE_BUF_LEN,
 };
 pub use self::request::{Decision, Request};
 
@@ -289,6 +291,8 @@ pub enum Error {
     UnexpectedDataFrame,
     /// A message is written while the message of a failed write is not finished yet
     UnfinishedWrite,
+    /// A whole message is read while a message read in chunks is not finished yet
+    UnfinishedRead,
     /// A server receives a frame that the client did not mask (RFC 6455 section 5.1)
     UnmaskedClientFrame,
     /// A client receives a frame that the server masked (RFC 6455 section 5.1)
