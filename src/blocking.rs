@@ -108,7 +108,10 @@ where
             }
             self.core.commit_read(received_size);
 
-            if let Some(sub_protocol) = self.core.decode_connect_response(&web_socket_key)? {
+            if let Some(sub_protocol) = self
+                .core
+                .decode_connect_response(&web_socket_key, websocket_options.sub_protocols)?
+            {
                 return Ok(sub_protocol);
             }
         }
@@ -124,20 +127,28 @@ where
     /// Read the HTTP request header with [`crate::read_http_header`] first and pass the
     /// resulting context.
     ///
+    /// `sub_protocol` is the sub protocol the server chose from
+    /// [`WebSocketContext::sec_websocket_protocol_list`], or `None` to choose none.
+    ///
     /// # Errors
     ///
     /// * [`FramerError::Io`] if writing to the stream fails.
+    /// * [`FramerError::WebSocket`] with [`Error::SubProtocolNotOffered`] if the client did not
+    ///   offer `sub_protocol`.
     /// * [`FramerError::WebSocket`] if the websocket is already open.
+    ///
+    /// [`Error::SubProtocolNotOffered`]: crate::Error::SubProtocolNotOffered
     pub fn accept<S>(
         &mut self,
         stream: &mut S,
         websocket_context: &WebSocketContext,
+        sub_protocol: Option<&WebSocketSubProtocol>,
     ) -> Result<(), FramerError<S::Error>>
     where
         S: Write,
     {
         self.send_unsent(stream)?;
-        let len = self.core.encode_accept(websocket_context)?;
+        let len = self.core.encode_accept(websocket_context, sub_protocol)?;
         self.send(stream, len)
     }
 }
@@ -567,6 +578,44 @@ mod tests {
             .unwrap();
         frame.truncate(len);
         frame
+    }
+
+    fn accept_with(sub_protocol: &str) -> Result<Vec<u8>, FramerError<core::convert::Infallible>> {
+        let mut read_buf = vec![0; 1024];
+        let mut write_buf = vec![0; 1024];
+        let mut state = FramerState::new();
+        let mut ws_server = WebSocketServer::new_server();
+        let mut framer = Framer::new(&mut read_buf, &mut state, &mut write_buf, &mut ws_server);
+        let mut stream = BufferStream::new(Vec::new());
+        let websocket_context = WebSocketContext {
+            sec_websocket_protocol_list: heapless::Vec::from_slice(&[
+                "chat".try_into().unwrap(),
+                "superchat".try_into().unwrap(),
+            ])
+            .unwrap(),
+            sec_websocket_key: "dGhlIHNhbXBsZSBub25jZQ==".try_into().unwrap(),
+        };
+        framer.accept(
+            &mut stream,
+            &websocket_context,
+            Some(&sub_protocol.try_into().unwrap()),
+        )?;
+        Ok(stream.write_buf)
+    }
+
+    #[test]
+    fn accept_sends_the_chosen_sub_protocol() {
+        let response = accept_with("superchat").unwrap();
+        let response = core::str::from_utf8(&response).unwrap();
+        assert!(response.contains("\r\nSec-WebSocket-Protocol: superchat\r\n"));
+    }
+
+    #[test]
+    fn accept_rejects_a_sub_protocol_the_client_did_not_offer() {
+        assert!(matches!(
+            accept_with("mqtt"),
+            Err(FramerError::WebSocket(crate::Error::SubProtocolNotOffered))
+        ));
     }
 
     #[test]

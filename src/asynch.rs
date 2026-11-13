@@ -112,7 +112,10 @@ where
             }
             self.core.commit_read(received_size);
 
-            if let Some(sub_protocol) = self.core.decode_connect_response(&web_socket_key)? {
+            if let Some(sub_protocol) = self
+                .core
+                .decode_connect_response(&web_socket_key, websocket_options.sub_protocols)?
+            {
                 return Ok(sub_protocol);
             }
         }
@@ -128,20 +131,28 @@ where
     /// Read the HTTP request header with [`crate::read_http_header`] first and pass the
     /// resulting context.
     ///
+    /// `sub_protocol` is the sub protocol the server chose from
+    /// [`WebSocketContext::sec_websocket_protocol_list`], or `None` to choose none.
+    ///
     /// # Errors
     ///
     /// * [`FramerError::Io`] if writing to the stream fails.
+    /// * [`FramerError::WebSocket`] with [`Error::SubProtocolNotOffered`] if the client did not
+    ///   offer `sub_protocol`.
     /// * [`FramerError::WebSocket`] if the websocket is already open.
+    ///
+    /// [`Error::SubProtocolNotOffered`]: crate::Error::SubProtocolNotOffered
     pub async fn accept<S>(
         &mut self,
         stream: &mut S,
         websocket_context: &WebSocketContext,
+        sub_protocol: Option<&WebSocketSubProtocol>,
     ) -> Result<(), FramerError<S::Error>>
     where
         S: Write,
     {
         self.send_unsent(stream).await?;
-        let len = self.core.encode_accept(websocket_context)?;
+        let len = self.core.encode_accept(websocket_context, sub_protocol)?;
         self.send(stream, len).await
     }
 }

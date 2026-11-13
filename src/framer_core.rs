@@ -134,11 +134,13 @@ where
     pub(crate) fn decode_connect_response<E>(
         &mut self,
         web_socket_key: &WebSocketKey,
+        sub_protocols: Option<&[&str]>,
     ) -> Result<Option<Option<WebSocketSubProtocol>>, FramerError<E>> {
-        match self
-            .websocket
-            .client_accept(web_socket_key, &self.read_buf[..*self.read_len])
-        {
+        match self.websocket.client_accept(
+            web_socket_key,
+            sub_protocols,
+            &self.read_buf[..*self.read_len],
+        ) {
             Ok((len, sub_protocol)) => {
                 self.consume(len);
                 Ok(Some(sub_protocol))
@@ -163,9 +165,22 @@ where
     pub(crate) fn encode_accept<E>(
         &mut self,
         websocket_context: &WebSocketContext,
+        sub_protocol: Option<&WebSocketSubProtocol>,
     ) -> Result<usize, FramerError<E>> {
+        if let Some(sub_protocol) = sub_protocol {
+            if !websocket_context
+                .sec_websocket_protocol_list
+                .contains(sub_protocol)
+            {
+                return Err(FramerError::WebSocket(crate::Error::SubProtocolNotOffered));
+            }
+        }
         self.websocket
-            .server_accept(&websocket_context.sec_websocket_key, None, self.write_buf)
+            .server_accept(
+                &websocket_context.sec_websocket_key,
+                sub_protocol,
+                self.write_buf,
+            )
             .map_err(FramerError::WebSocket)
     }
 }

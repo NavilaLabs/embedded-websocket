@@ -73,6 +73,7 @@ pub fn read_http_header<'a>(
 
 pub fn read_server_connect_handshake_response(
     sec_websocket_key: &WebSocketKey,
+    offered_sub_protocols: Option<&[&str]>,
     from: &[u8],
 ) -> Result<(usize, Option<WebSocketSubProtocol>)> {
     let mut headers = [httparse::EMPTY_HEADER; 64];
@@ -90,6 +91,7 @@ pub fn read_server_connect_handshake_response(
             };
 
             let mut sec_websocket_protocol: Option<WebSocketSubProtocol> = None;
+            let mut is_accepted = false;
             for item in response.headers.iter() {
                 if item.name.eq_ignore_ascii_case("sec-websocket-accept") {
                     let mut output = [0; 28];
@@ -101,11 +103,22 @@ pub fn read_server_connect_handshake_response(
                     if actual_accept_string != expected_accept_string {
                         return Err(Error::AcceptStringInvalid);
                     }
+                    is_accepted = true;
                 } else if item.name.eq_ignore_ascii_case("sec-websocket-protocol") {
-                    sec_websocket_protocol = Some(String::try_from(str::from_utf8(item.value)?)?);
+                    let sub_protocol = str::from_utf8(item.value)?;
+                    if !offered_sub_protocols
+                        .unwrap_or_default()
+                        .contains(&sub_protocol)
+                    {
+                        return Err(Error::SubProtocolNotOffered);
+                    }
+                    sec_websocket_protocol = Some(String::try_from(sub_protocol)?);
                 }
             }
 
+            if !is_accepted {
+                return Err(Error::AcceptStringInvalid);
+            }
             Ok((len, sec_websocket_protocol))
         }
         httparse::Status::Partial => Err(Error::HttpHeaderIncomplete),
@@ -245,5 +258,33 @@ mod tests {
         let mut output = [0; 28];
         build_accept_string(&key, &mut output).unwrap();
         assert_eq!(&output, b"s3pPLMBiTxaQ9kYGzzhZRbK+xOo=");
+    }
+
+    fn key() -> WebSocketKey {
+        WebSocketKey::try_from("Z7OY1UwHOx/nkSz38kfPwg==").unwrap()
+    }
+
+    #[test]
+    fn response_without_accept_string_is_rejected() {
+        let response = b"HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n";
+        assert_eq!(
+            read_server_connect_handshake_response(&key(), None, response),
+            Err(Error::AcceptStringInvalid)
+        );
+    }
+
+    #[test]
+    fn sub_protocol_the_client_did_not_offer_is_rejected() {
+        let response = b"HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Protocol: chat\r\nSec-WebSocket-Accept: ptPnPeDOTo6khJlzmLhOZSh2tAY=\r\n\r\n";
+        for offered in [None, Some(&["superchat"][..])] {
+            assert_eq!(
+                read_server_connect_handshake_response(&key(), offered, response),
+                Err(Error::SubProtocolNotOffered)
+            );
+        }
+        let (_, sub_protocol) =
+            read_server_connect_handshake_response(&key(), Some(&["superchat", "chat"]), response)
+                .unwrap();
+        assert_eq!(sub_protocol.unwrap(), "chat");
     }
 }

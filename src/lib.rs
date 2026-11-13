@@ -211,6 +211,8 @@ pub enum Error {
     ReadFrameIncomplete,
     HttpResponseCodeInvalid(Option<u16>),
     AcceptStringInvalid,
+    /// The sub protocol of the opening handshake is not one the client offered
+    SubProtocolNotOffered,
     ConvertInfallible,
     RandCore,
     UnexpectedContinuationFrame,
@@ -526,15 +528,16 @@ where
     }
 
     /// Used by a websocket client for checking the server response to an opening handshake
-    /// (sent using the client_connect function). If the client requested one or more sub protocols
-    /// the server will choose one (or none) and you get that in the result
+    /// (sent using the client_connect function). Pass the sub protocols the client requested in
+    /// `sub_protocols`. The server chooses one of them (or none) and you get that in the result
     /// # Examples
     /// ```
     /// use embedded_io_websocket as ws;
     /// let mut ws_client = ws::WebSocketClient::new_client(rand::rng());
     /// let ws_key = ws::WebSocketKey::try_from("Z7OY1UwHOx/nkSz38kfPwg==").unwrap();
     /// let server_response_html = "HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Protocol: chat\r\nSec-WebSocket-Accept: ptPnPeDOTo6khJlzmLhOZSh2tAY=\r\n\r\n";    ///
-    /// let (len, sub_protocol) = ws_client.client_accept(&ws_key, server_response_html.as_bytes())
+    /// let (len, sub_protocol) = ws_client
+    ///     .client_accept(&ws_key, Some(&["chat"]), server_response_html.as_bytes())
     ///     .unwrap();
     ///
     /// assert_eq!(159, len);
@@ -543,18 +546,21 @@ where
     /// # Errors
     /// * Returns `HttpResponseCodeInvalid` if the HTTP response code is not `101 Switching Protocols`
     /// * Returns `AcceptStringInvalid` if the web server failed to return a valid accept string
+    /// * Returns `SubProtocolNotOffered` if the server chose a sub protocol that is not in
+    ///   `sub_protocols`
     /// * Returns `HttpHeader(Version)` or some other varient if the HTTP response is not well formed
     /// * Returns `WebsocketAlreadyOpen` if called on a websocket that is already open
     pub fn client_accept(
         &mut self,
         sec_websocket_key: &WebSocketKey,
+        sub_protocols: Option<&[&str]>,
         from: &[u8],
     ) -> Result<(usize, Option<WebSocketSubProtocol>)> {
         if self.state == WebSocketState::Open {
             return Err(Error::WebsocketAlreadyOpen);
         }
 
-        match http::read_server_connect_handshake_response(sec_websocket_key, from) {
+        match http::read_server_connect_handshake_response(sec_websocket_key, sub_protocols, from) {
             Ok((len, sec_websocket_protocol)) => {
                 self.state = WebSocketState::Open;
                 Ok((len, sec_websocket_protocol))

@@ -90,7 +90,7 @@ async fn handle_client(stream: TcpStream) -> Result<()> {
         let mut framer = Framer::new(&mut read_buf, &mut state, &mut write_buf, &mut websocket);
 
         // complete the opening handshake with the client
-        framer.accept(&mut stream, &websocket_context).await?;
+        framer.accept(&mut stream, &websocket_context, None).await?;
         println!("Websocket connection opened");
 
         // read websocket frames
