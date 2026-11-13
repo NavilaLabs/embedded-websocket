@@ -777,6 +777,9 @@ where
     /// Initiates a close handshake.
     /// Both the client and server may initiate a close handshake. If successful the function
     /// changes the websocket state from Open -> CloseSent
+    ///
+    /// A `status_description` longer than 123 bytes is cut at the last character that fits, so
+    /// the close frame stays within the 125 bytes a control frame may carry.
     /// # Errors
     /// * Returns `WebSocketNotOpen` when the websocket is not open when this function is called
     /// * Returns `WriteToBufferTooSmall` when the `to` buffer is too small to fit the websocket
@@ -790,16 +793,13 @@ where
         if self.state == WebSocketState::Open {
             self.state = WebSocketState::CloseSent;
             if let Some(status_description) = status_description {
-                let mut from_buffer: Vec<u8, 256> = Vec::new();
+                let mut from_buffer: Vec<u8, MAX_CONTROL_FRAME_PAYLOAD_LEN> = Vec::new();
                 from_buffer.extend_from_slice(&close_status.to_u16().to_be_bytes())?;
 
-                // restrict the max size of the status_description
-                let len = if status_description.len() < 254 {
-                    status_description.len()
-                } else {
-                    254
-                };
-
+                let mut len = status_description.len().min(from_buffer.capacity() - 2);
+                while !status_description.is_char_boundary(len) {
+                    len -= 1;
+                }
                 from_buffer.extend_from_slice(&status_description.as_bytes()[..len])?;
                 self.write_frame(&from_buffer, to, WebSocketOpCode::ConnectionClose, true)
             } else {
@@ -1298,6 +1298,32 @@ mod tests {
         ] {
             assert_eq!(read_frames(frame, 1).err(), expected, "{frame:x?}");
         }
+    }
+
+    #[test]
+    fn close_cuts_a_long_description_at_a_character_boundary() {
+        let mut ws_client = WebSocketClient::new_client(rand::rng());
+        ws_client.state = WebSocketState::Open;
+        let description = "é".repeat(100);
+        let mut to = [0; 256];
+        let len = ws_client
+            .close(
+                WebSocketCloseStatusCode::NormalClosure,
+                Some(&description),
+                &mut to,
+            )
+            .unwrap();
+
+        let mut ws_server = WebSocketServer::new_server();
+        ws_server.state = WebSocketState::Open;
+        let mut payload = [0; 256];
+        let result = ws_server.read(&to[..len], &mut payload).unwrap();
+        assert_eq!(
+            result.message_type,
+            WebSocketReceiveMessageType::CloseMustReply
+        );
+        assert_eq!(result.len_to, 2 + 122);
+        assert!(str::from_utf8(&payload[2..result.len_to]).is_ok());
     }
 
     #[test]
