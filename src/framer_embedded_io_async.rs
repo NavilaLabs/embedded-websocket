@@ -70,7 +70,6 @@ where
 {
     core: FramerCore<'a, TRng, TWebSocketType>,
     unsent: &'a mut Range<usize>,
-    control_frames: &'a mut u64,
 }
 
 impl<'a, TRng> Framer<'a, TRng, crate::Client>
@@ -174,9 +173,15 @@ where
             control_frames,
         } = state;
         Self {
-            core: FramerCore::new(read_buf, read_cursor, frame_cursor, write_buf, websocket),
+            core: FramerCore::new(
+                read_buf,
+                read_cursor,
+                frame_cursor,
+                control_frames,
+                write_buf,
+                websocket,
+            ),
             unsent,
-            control_frames,
         }
     }
 
@@ -260,13 +265,7 @@ where
     {
         self.send_unsent(stream).await?;
         loop {
-            // Counted right after decoding, so a cancelled read keeps the count of frames it
-            // already consumed.
-            let decoded = self.core.decode(frame_buf);
-            *self.control_frames = self
-                .control_frames
-                .saturating_add(self.core.take_control_frames());
-            match decoded? {
+            match self.core.decode(frame_buf)? {
                 Decoded::NeedMoreData => {
                     let len = stream
                         .read(self.core.read_space()?)

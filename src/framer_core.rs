@@ -93,8 +93,7 @@ impl FramerState {
         }
     }
 
-    /// Number of pings, pongs and non-final data frames decoded on this connection so far, by
-    /// the async framer only; the blocking framers do not count.
+    /// Number of pings, pongs and non-final data frames decoded on this connection so far.
     ///
     /// A peer can send these without ever completing a message, so a caller that limits
     /// messages cannot see them. Saturates at `u64::MAX`.
@@ -115,7 +114,7 @@ where
     write_buf: &'a mut [u8],
     frame_cursor: &'a mut usize,
     websocket: &'a mut WebSocket<TRng, TWebSocketType>,
-    control_frames: u64,
+    control_frames: &'a mut u64,
 }
 
 impl<'a, TRng> FramerCore<'a, TRng, crate::Client>
@@ -180,6 +179,7 @@ where
         read_buf: &'a mut [u8],
         read_len: &'a mut usize,
         frame_cursor: &'a mut usize,
+        control_frames: &'a mut u64,
         write_buf: &'a mut [u8],
         websocket: &'a mut WebSocket<TRng, TWebSocketType>,
     ) -> Self {
@@ -189,12 +189,8 @@ where
             write_buf,
             frame_cursor,
             websocket,
-            control_frames: 0,
+            control_frames,
         }
-    }
-
-    pub(crate) fn take_control_frames(&mut self) -> u64 {
-        core::mem::take(&mut self.control_frames)
     }
 
     pub(crate) fn state(&self) -> WebSocketState {
@@ -284,7 +280,7 @@ where
                         None => ws_result.end_of_message,
                     };
                     if starts_new_frame && !header_is_final {
-                        self.control_frames = self.control_frames.saturating_add(1);
+                        *self.control_frames = self.control_frames.saturating_add(1);
                     }
                     if ws_result.end_of_message {
                         *self.frame_cursor = 0;
@@ -309,7 +305,7 @@ where
                     return Ok(Decoded::Message(Message::Closed));
                 }
                 WebSocketReceiveMessageType::Ping => {
-                    self.control_frames = self.control_frames.saturating_add(1);
+                    *self.control_frames = self.control_frames.saturating_add(1);
                     let len = self.encode_write(
                         WebSocketSendMessageType::Pong,
                         true,
@@ -318,7 +314,7 @@ where
                     return Ok(Decoded::SendThenContinue(len));
                 }
                 WebSocketReceiveMessageType::Pong => {
-                    self.control_frames = self.control_frames.saturating_add(1);
+                    *self.control_frames = self.control_frames.saturating_add(1);
                     return Ok(Decoded::Message(Message::Pong(payload)));
                 }
             }

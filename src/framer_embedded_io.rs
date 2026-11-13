@@ -166,10 +166,17 @@ where
             read_cursor,
             frame_cursor,
             unsent,
-            ..
+            control_frames,
         } = state;
         Self {
-            core: FramerCore::new(read_buf, read_cursor, frame_cursor, write_buf, websocket),
+            core: FramerCore::new(
+                read_buf,
+                read_cursor,
+                frame_cursor,
+                control_frames,
+                write_buf,
+                websocket,
+            ),
             unsent,
         }
     }
@@ -559,6 +566,36 @@ mod tests {
             .unwrap();
         frame.truncate(len);
         frame
+    }
+
+    #[test]
+    fn counts_pings_pongs_and_non_final_fragments() {
+        let mut read_buf = vec![0; 1024];
+        let mut write_buf = vec![0; 1024];
+        let mut frame_buf = vec![0; 1024];
+        let mut state = FramerState::new();
+        let mut ws_server = WebSocketServer::new_server();
+        ws_server.state = WebSocketState::Open;
+        let mut stream = ScriptedStream::new();
+        for chunk in [
+            client_frame(b"a", WebSocketOpCode::Ping, true),
+            client_frame(b"b", WebSocketOpCode::Pong, true),
+            client_frame(b"x", WebSocketOpCode::TextFrame, false),
+            client_frame(b"y", WebSocketOpCode::ContinuationFrame, true),
+        ] {
+            stream.chunks.push_back(chunk);
+        }
+
+        let mut framer = Framer::new(&mut read_buf, &mut state, &mut write_buf, &mut ws_server);
+        assert!(matches!(
+            framer.read(&mut stream, &mut frame_buf).unwrap(),
+            ReadResult::Pong(_)
+        ));
+        assert!(matches!(
+            framer.read(&mut stream, &mut frame_buf).unwrap(),
+            ReadResult::Text("xy")
+        ));
+        assert_eq!(state.control_frames(), 3);
     }
 
     #[test]
