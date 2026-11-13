@@ -1,15 +1,61 @@
-//! # Embedded IO Websocket
+//! A `no_std` websocket library (RFC 6455) for clients and servers, with framers for streams that
+//! implement the [`embedded_io`] or [`embedded_io_async`](https://docs.rs/embedded-io-async) traits.
 //!
-//! `embedded_io_websocket` facilitates the encoding and decoding of websocket frames and can be used
-//! for both clients and servers. The library is intended to be used in constrained memory
-//! environments like embedded microcontrollers which cannot reference the rust standard library.
-//! It will work with arbitrarily small buffers regardless of websocket frame size as long as the
-//! websocket header can be read (2 - 14 bytes depending on the payload size and masking).
-//! Since the library is essentially an encoder or decoder of byte slices, the developer is free to
-//! use whatever transport mechanism they chose. The examples in the source repository use the
-//! TcpStream from the standard library.
+//! # Framers
+//!
+//! Start with [`blocking::Framer`], or [`asynch::Framer`] with the `asynch` feature. A framer
+//! works on buffers you provide and reads and writes whole messages:
+//!
+//! * The client performs the opening handshake with `connect`, the server with `accept`, which
+//!   lets you decide per request whether to open a websocket, for example by path.
+//! * `read` returns whole text and binary messages, answers pings and completes a close
+//!   handshake the other party starts. If the other party violates the protocol, the framer
+//!   closes the connection with the matching status code.
+//! * `write` splits messages that do not fit into the write buffer into several frames.
+//!
+//! A read or write that fails, or is cancelled in the async framer, can be called again with a
+//! framer created from the same buffers and [`FramerState`]: it continues where it stopped.
+//!
+//! ```no_run
+//! use embedded_io_websocket::{
+//!     blocking::Framer, FramerError, FramerState, ReadResult, WebSocketClient, WebSocketOptions,
+//!     WebSocketSendMessageType,
+//! };
+//!
+//! fn echo_once<S: embedded_io::Read + embedded_io::Write>(
+//!     stream: &mut S,
+//! ) -> Result<(), FramerError<S::Error>> {
+//!     let (mut read_buf, mut write_buf, mut frame_buf) = ([0; 1024], [0; 1024], [0; 1024]);
+//!     let mut state = FramerState::new();
+//!     let mut websocket = WebSocketClient::new_client(rand::rng());
+//!     let mut framer = Framer::new(&mut read_buf, &mut state, &mut write_buf, &mut websocket);
+//!
+//!     let options = WebSocketOptions {
+//!         path: "/chat",
+//!         host: "localhost",
+//!         origin: "http://localhost",
+//!         sub_protocols: None,
+//!         additional_headers: None,
+//!     };
+//!     framer.connect(stream, &options)?;
+//!     framer.write(stream, WebSocketSendMessageType::Text, true, b"hello")?;
+//!     if let ReadResult::Text(text) = framer.read(stream, &mut frame_buf)? {
+//!         assert_eq!(text, "hello");
+//!     }
+//!     Ok(())
+//! }
+//! ```
+//!
+//! # Without a framer
+//!
+//! [`WebSocketClient`] and [`WebSocketServer`] encode and decode handshakes and frames on byte
+//! slices, so they work with any transport.
+//!
+//! # Features
+//!
+//! * `asynch`: the [`asynch`] module with the async framer.
+//! * `std`: implements `std::error::Error` for [`Error`].
 
-// support for websockets without using the standard library
 #![cfg_attr(not(feature = "std"), no_std)]
 #![cfg_attr(docsrs, feature(doc_cfg))]
 #![warn(missing_docs)]
