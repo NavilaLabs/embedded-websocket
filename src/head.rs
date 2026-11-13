@@ -42,18 +42,9 @@ impl<'a> Head<'a> {
             start_line: str::from_utf8(start_line).map_err(|_| Error::HttpHeaderInvalid)?,
             fields,
         };
-        if fields.is_empty() {
-            return Ok(head);
-        }
-        for line in fields.split(|&byte| byte == b'\n') {
-            let line = line.strip_suffix(b"\r").unwrap_or(line);
-            if !is_valid_field(line) {
-                return Err(Error::HttpHeaderInvalid);
-            }
-        }
-        if fields.iter().filter(|&&byte| byte == b'\r').count()
-            != fields.iter().filter(|&&byte| byte == b'\n').count()
-        {
+        // A field line cannot contain CR or LF, so a bare CR or LF fails here instead of being
+        // read as a line break that other HTTP parsers would not see.
+        if !lines(fields).all(is_valid_field) {
             return Err(Error::HttpHeaderInvalid);
         }
         Ok(head)
@@ -68,17 +59,12 @@ impl<'a> Head<'a> {
 
     /// Name and value of every header field, with the whitespace around the value removed.
     pub(crate) fn fields(&self) -> impl Iterator<Item = (&'a str, &'a [u8])> {
-        let fields = self.fields;
-        fields
-            .split(|&byte| byte == b'\n')
-            .filter(move |_| !fields.is_empty())
-            .map(|line| {
-                let line = line.strip_suffix(b"\r").unwrap_or(line);
-                let colon = line.iter().position(|&byte| byte == b':').unwrap_or(0);
-                // validated in `parse`: the name is a token and therefore ASCII
-                let name = str::from_utf8(&line[..colon]).unwrap_or_default();
-                (name, line[colon + 1..].trim_ascii())
-            })
+        lines(self.fields).map(|line| {
+            let colon = line.iter().position(|&byte| byte == b':').unwrap_or(0);
+            // validated in `parse`: the name is a token and therefore ASCII
+            let name = str::from_utf8(&line[..colon]).unwrap_or_default();
+            (name, line[colon + 1..].trim_ascii())
+        })
     }
 
     /// The value of the first header field called `name`, compared case-insensitively.
@@ -107,6 +93,21 @@ impl<'a> Head<'a> {
 
 fn find_line_end(bytes: &[u8]) -> Option<usize> {
     bytes.windows(2).position(|window| window == b"\r\n")
+}
+
+// Splits only at CRLF, so a bare CR or LF stays inside its line.
+fn lines(mut bytes: &[u8]) -> impl Iterator<Item = &[u8]> {
+    core::iter::from_fn(move || {
+        if bytes.is_empty() {
+            return None;
+        }
+        let line;
+        (line, bytes) = match find_line_end(bytes) {
+            Some(end) => (&bytes[..end], &bytes[end + 2..]),
+            None => (bytes, &[][..]),
+        };
+        Some(line)
+    })
 }
 
 // RFC 9110 section 5: field-name ":" OWS field-value OWS, without obsolete line folding
@@ -167,6 +168,8 @@ mod tests {
             b"GET / HTTP/1.1\r\nHost: a\r\n folded\r\n\r\n",
             b"GET / HTTP/1.1\r\nHost: a\nX: b\r\n\r\n",
             b"GET / HTTP/1.1\r\nHost: a\rX: b\r\n\r\n",
+            b"GET / HTTP/1.1\r\nA: a\nB: b\r\r\n\r\n",
+            b"GET / HTTP/1.1\r\nA: a\r\r\n\r\n",
             b"GET / HTTP/1.1\r\nHost: a\0\r\n\r\n",
             b"GET /\0 HTTP/1.1\r\n\r\n",
             b"GET / HTTP/1.1\r\n",
