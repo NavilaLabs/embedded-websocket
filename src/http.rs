@@ -150,7 +150,9 @@ pub fn build_connect_handshake_request(
     }
 
     http_request.push_str("Sec-WebSocket-Version: 13\r\n\r\n")?;
-    to[..http_request.len()].copy_from_slice(http_request.as_bytes());
+    to.get_mut(..http_request.len())
+        .ok_or(Error::WriteToBufferTooSmall)?
+        .copy_from_slice(http_request.as_bytes());
     Ok((http_request.len(), sec_websocket_key))
 }
 
@@ -179,8 +181,9 @@ pub fn build_connect_handshake_response(
     http_response.push_str(accept_string)?;
     http_response.push_str("\r\n\r\n")?;
 
-    // save the response to the buffer
-    to[..http_response.len()].copy_from_slice(http_response.as_bytes());
+    to.get_mut(..http_response.len())
+        .ok_or(Error::WriteToBufferTooSmall)?
+        .copy_from_slice(http_response.as_bytes());
     Ok(http_response.len())
 }
 
@@ -251,6 +254,30 @@ mod tests {
         assert_eq!(
             read_server_connect_handshake_response(&key(), None, response),
             Err(Error::AcceptStringInvalid)
+        );
+    }
+
+    #[test]
+    fn handshakes_that_do_not_fit_the_output_fail_instead_of_panicking() {
+        let options = WebSocketOptions {
+            path: "/chat",
+            host: "localhost",
+            origin: "http://localhost",
+            sub_protocols: None,
+            additional_headers: None,
+        };
+        let mut to = [0; 1024];
+        let (len, _) =
+            build_connect_handshake_request(&options, &mut rand::rng(), &mut to).unwrap();
+        assert_eq!(
+            build_connect_handshake_request(&options, &mut rand::rng(), &mut to[..len - 1]).err(),
+            Some(Error::WriteToBufferTooSmall)
+        );
+
+        let len = build_connect_handshake_response(&key(), None, &mut to).unwrap();
+        assert_eq!(
+            build_connect_handshake_response(&key(), None, &mut to[..len - 1]).err(),
+            Some(Error::WriteToBufferTooSmall)
         );
     }
 
