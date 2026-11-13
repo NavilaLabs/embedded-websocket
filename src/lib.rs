@@ -652,9 +652,10 @@ where
     }
 
     /// Writes the payload in `from` to a websocket frame in `to`
-    /// * message_type - The type of message to send: Text, Binary or CloseReply
+    /// * message_type - The type of message to send: Text, Binary, Ping, Pong or CloseReply
     /// * end_of_message - False to fragment a frame into multiple smaller frames. The last frame
-    ///   should set this to true
+    ///   should set this to true. Ignored for Ping, Pong and CloseReply: control frames are
+    ///   never fragmented and may be sent between the frames of a fragmented message
     /// * from - The buffer containing the payload to encode
     /// * to - The the buffer to save the websocket encoded payload to.
     ///   Returns the number of bytes written to the `to` buffer
@@ -685,15 +686,26 @@ where
         to: &mut [u8],
     ) -> Result<usize> {
         if self.state == WebSocketState::Open || self.state == WebSocketState::CloseReceived {
-            let mut op_code = message_type.to_op_code();
-            if op_code == WebSocketOpCode::ConnectionClose {
-                self.state = WebSocketState::Closed
-            } else if self.is_write_continuation {
-                op_code = WebSocketOpCode::ContinuationFrame;
+            let op_code = message_type.to_op_code();
+            match op_code {
+                WebSocketOpCode::TextFrame | WebSocketOpCode::BinaryFrame => {
+                    let op_code = if self.is_write_continuation {
+                        WebSocketOpCode::ContinuationFrame
+                    } else {
+                        op_code
+                    };
+                    self.is_write_continuation = !end_of_message;
+                    self.write_frame(from, to, op_code, end_of_message)
+                }
+                _ => {
+                    if op_code == WebSocketOpCode::ConnectionClose {
+                        self.state = WebSocketState::Closed
+                    }
+                    // Control frames are never fragmented and may be sent between the frames of a
+                    // fragmented message (RFC 6455 section 5.5).
+                    self.write_frame(from, to, op_code, true)
+                }
             }
-
-            self.is_write_continuation = !end_of_message;
-            self.write_frame(from, to, op_code, end_of_message)
         } else {
             Err(Error::WebSocketNotOpen)
         }
@@ -1591,6 +1603,37 @@ Upgrade: websocket
             std::str::from_utf8(&buffer2[..ws_result.len_to]).unwrap()
         );
         assert_eq!(true, ws_result.end_of_message);
+    }
+
+    #[test]
+    fn control_frames_inside_a_fragmented_message_keep_their_opcode() {
+        // first header byte of an unmasked frame: FIN bit followed by the opcode
+        let mut buffer = [0; 64];
+        let mut ws_server = WebSocketServer::new_server();
+        ws_server.state = WebSocketState::Open;
+        let mut first_header_byte = |message_type, end_of_message| {
+            ws_server
+                .write(message_type, end_of_message, b"x", &mut buffer)
+                .unwrap();
+            buffer[0]
+        };
+
+        assert_eq!(
+            first_header_byte(WebSocketSendMessageType::Text, false),
+            0x01
+        );
+        assert_eq!(
+            first_header_byte(WebSocketSendMessageType::Ping, false),
+            0x89
+        );
+        assert_eq!(
+            first_header_byte(WebSocketSendMessageType::Pong, true),
+            0x8A
+        );
+        assert_eq!(
+            first_header_byte(WebSocketSendMessageType::Text, true),
+            0x80
+        );
     }
 
     #[test]
