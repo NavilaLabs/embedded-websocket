@@ -75,6 +75,8 @@ pub struct FramerState {
     pub(crate) frame_cursor: usize,
     pub(crate) unsent: Range<usize>,
     pub(crate) control_frames: u64,
+    // Bytes at the start of the current text message that are known to be valid UTF-8.
+    pub(crate) text_checked: usize,
 }
 
 impl FramerState {
@@ -91,6 +93,7 @@ impl FramerState {
             frame_cursor: 0,
             unsent: 0..0,
             control_frames: 0,
+            text_checked: 0,
         }
     }
 
@@ -328,17 +331,18 @@ where
                     if starts_new_frame && !header_is_final {
                         self.state.control_frames = self.state.control_frames.saturating_add(1);
                     }
+                    let is_text = ws_result.message_type == WebSocketReceiveMessageType::Text;
+                    if is_text {
+                        self.check_text(&frame_buf[..payload.end], ws_result.end_of_message)?;
+                    }
                     if ws_result.end_of_message {
                         self.state.frame_cursor = 0;
-                        return Ok(Decoded::Message(
-                            if ws_result.message_type == WebSocketReceiveMessageType::Binary {
-                                Message::Binary(payload.end)
-                            } else {
-                                core::str::from_utf8(&frame_buf[..payload.end])
-                                    .map_err(FramerError::Utf8)?;
-                                Message::Text(payload.end)
-                            },
-                        ));
+                        self.state.text_checked = 0;
+                        return Ok(Decoded::Message(if is_text {
+                            Message::Text(payload.end)
+                        } else {
+                            Message::Binary(payload.end)
+                        }));
                     }
                 }
                 WebSocketReceiveMessageType::CloseMustReply => {
@@ -375,6 +379,19 @@ where
         } else {
             Ok(Decoded::NeedMoreData)
         }
+    }
+
+    // Fails as soon as a fragment makes the message invalid instead of waiting for its end. Only
+    // a message that is not complete yet may end inside a character.
+    fn check_text<E>(&mut self, text: &[u8], is_complete: bool) -> Result<(), FramerError<E>> {
+        match core::str::from_utf8(&text[self.state.text_checked..]) {
+            Ok(_) => self.state.text_checked = text.len(),
+            Err(error) if error.error_len().is_none() && !is_complete => {
+                self.state.text_checked += error.valid_up_to();
+            }
+            Err(error) => return Err(FramerError::Utf8(error)),
+        }
+        Ok(())
     }
 
     fn consume(&mut self, len: usize) {

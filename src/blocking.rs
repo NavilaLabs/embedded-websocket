@@ -643,6 +643,42 @@ mod tests {
     }
 
     #[test]
+    fn invalid_text_fragment_fails_before_the_message_ends() {
+        let (error, written) = server_reads(client_frame(
+            &[b'a', 0xFF],
+            WebSocketOpCode::TextFrame,
+            false,
+        ));
+        assert!(matches!(error, FramerError::Utf8(_)));
+        assert_eq!(written, [0x88, 0x02, 0x03, 0xEF]);
+    }
+
+    #[test]
+    fn text_fragment_may_end_inside_a_character() {
+        let mut read_buf = vec![0; 1024];
+        let mut write_buf = vec![0; 1024];
+        let mut frame_buf = vec![0; 1024];
+        let mut state = FramerState::new();
+        let mut ws_server = WebSocketServer::new_server();
+        ws_server.state = WebSocketState::Open;
+        let mut stream = ScriptedStream::new();
+        let euro = "€".as_bytes();
+        stream
+            .chunks
+            .push_back(client_frame(&euro[..1], WebSocketOpCode::TextFrame, false));
+        stream.chunks.push_back(client_frame(
+            &euro[1..],
+            WebSocketOpCode::ContinuationFrame,
+            true,
+        ));
+        let mut framer = Framer::new(&mut read_buf, &mut state, &mut write_buf, &mut ws_server);
+        assert!(matches!(
+            framer.read(&mut stream, &mut frame_buf).unwrap(),
+            ReadResult::Text("€")
+        ));
+    }
+
+    #[test]
     fn counts_pings_pongs_and_non_final_fragments() {
         let mut read_buf = vec![0; 1024];
         let mut write_buf = vec![0; 1024];
