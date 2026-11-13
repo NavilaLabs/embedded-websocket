@@ -216,6 +216,12 @@ pub enum Error {
     ConvertInfallible,
     RandCore,
     UnexpectedContinuationFrame,
+    /// A frame sets reserved bits although no extension was negotiated
+    ReservedBitsSet,
+    /// A control frame is fragmented
+    FragmentedControlFrame,
+    /// A text or binary frame starts while a fragmented message is still incomplete
+    UnexpectedDataFrame,
 }
 
 impl From<httparse::Error> for Error {
@@ -801,6 +807,9 @@ where
                 // handle fragmented messages
                 match result.op_code {
                     WebSocketOpCode::BinaryFrame | WebSocketOpCode::TextFrame => {
+                        if self.continuation_frame_op_code.is_some() {
+                            return Err(Error::UnexpectedDataFrame);
+                        }
                         // set the continuation frame op code if this is a fragmented message
                         self.continuation_frame_op_code = if result.is_fin_bit_set {
                             None
@@ -809,9 +818,11 @@ where
                         };
                     }
                     WebSocketOpCode::ContinuationFrame => {
-                        // override the op code we get from the result with our continuation frame opcode if it exists
-                        if let Some(continuation_frame_op_code) = self.continuation_frame_op_code {
-                            result.op_code = continuation_frame_op_code;
+                        result.op_code = self
+                            .continuation_frame_op_code
+                            .ok_or(Error::UnexpectedContinuationFrame)?;
+                        if result.is_fin_bit_set {
+                            self.continuation_frame_op_code = None;
                         }
                     }
                     _ => {
@@ -852,7 +863,7 @@ where
             to_buffer[0] = byte1;
             to_buffer[1] = mask_bit_set_as_byte | count as u8;
             header_size = BYTE_HEADER_SIZE;
-        } else if count < 65535 {
+        } else if count <= u16::MAX as usize {
             if payload_len + SHORT_HEADER_SIZE > to_buffer.len() {
                 return Err(Error::WriteToBufferTooSmall);
             }
@@ -1004,8 +1015,19 @@ fn read_frame(
     // process first byte
     const FIN_BIT_FLAG: u8 = 0x80;
     const OP_CODE_FLAG: u8 = 0x0F;
+    const RESERVED_BITS_FLAG: u8 = 0x70;
     let is_fin_bit_set = (byte1 & FIN_BIT_FLAG) == FIN_BIT_FLAG;
+    if byte1 & RESERVED_BITS_FLAG != 0 {
+        return Err(Error::ReservedBitsSet);
+    }
     let op_code = get_op_code(byte1 & OP_CODE_FLAG)?;
+    let is_control_frame = matches!(
+        op_code,
+        WebSocketOpCode::ConnectionClose | WebSocketOpCode::Ping | WebSocketOpCode::Pong
+    );
+    if is_control_frame && !is_fin_bit_set {
+        return Err(Error::FragmentedControlFrame);
+    }
 
     // process second byte
     const MASK_FLAG: u8 = 0x80;
@@ -1038,6 +1060,9 @@ fn read_frame(
 
     let has_continuation = len_read < len;
     num_bytes_read += len_read;
+    if op_code == WebSocketOpCode::ConnectionClose && !has_continuation {
+        validate_close_payload(&to_buffer[..len_read])?;
+    }
 
     let frame = match op_code {
         WebSocketOpCode::ConnectionClose => decode_close_frame(to_buffer, num_bytes_read, len_read),
@@ -1064,6 +1089,25 @@ fn read_frame(
         Ok((frame, continuation_read))
     } else {
         Ok((frame, None))
+    }
+}
+
+// RFC 6455 section 7.4: codes a peer may send, including those registered with IANA later
+fn is_valid_close_status_code(code: u16) -> bool {
+    matches!(code, 1000..=1003 | 1007..=1014 | 3000..=4999)
+}
+
+fn validate_close_payload(payload: &[u8]) -> Result<()> {
+    match payload {
+        [] => Ok(()),
+        [_] => Err(Error::InvalidFrameLength),
+        [high, low, reason @ ..] => {
+            if !is_valid_close_status_code(u16::from_be_bytes([*high, *low])) {
+                return Err(Error::InvalidCloseStatusCode);
+            }
+            str::from_utf8(reason)?;
+            Ok(())
+        }
     }
 }
 
@@ -1143,6 +1187,95 @@ fn build_client_disconnected_frame(num_bytes_from: usize) -> WebSocketFrame {
 mod tests {
     extern crate std;
     use super::*;
+
+    fn read_frames(frames: &[u8], reads: usize) -> Result<WebSocketReadResult> {
+        let mut ws_client = WebSocketClient::new_client(rand::rng());
+        ws_client.state = WebSocketState::Open;
+        let mut to = [0; 64];
+        let mut from = frames;
+        for _ in 1..reads {
+            let result = ws_client.read(from, &mut to)?;
+            from = &from[result.len_from..];
+        }
+        ws_client.read(from, &mut to)
+    }
+
+    #[test]
+    fn frame_with_reserved_bits_is_rejected() {
+        assert_eq!(
+            read_frames(&[0xC1, 0x01, b'a'], 1).err(),
+            Some(Error::ReservedBitsSet)
+        );
+    }
+
+    #[test]
+    fn fragmented_control_frame_is_rejected() {
+        assert_eq!(
+            read_frames(&[0x09, 0x00], 1).err(),
+            Some(Error::FragmentedControlFrame)
+        );
+    }
+
+    #[test]
+    fn data_frame_inside_a_fragmented_message_is_rejected() {
+        let frames = [0x01, 0x01, b'a', 0x01, 0x01, b'b'];
+        assert_eq!(
+            read_frames(&frames, 2).err(),
+            Some(Error::UnexpectedDataFrame)
+        );
+    }
+
+    #[test]
+    fn continuation_frame_after_a_finished_message_is_rejected() {
+        let frames = [0x01, 0x01, b'a', 0x80, 0x01, b'b', 0x00, 0x01, b'c'];
+        assert!(read_frames(&frames, 2).unwrap().end_of_message);
+        assert_eq!(
+            read_frames(&frames, 3).err(),
+            Some(Error::UnexpectedContinuationFrame)
+        );
+    }
+
+    #[test]
+    fn close_frame_payload_is_validated() {
+        for (frame, expected) in [
+            (&[0x88, 0x01, 0x03][..], Some(Error::InvalidFrameLength)),
+            (
+                &[0x88, 0x02, 0x00, 0x00],
+                Some(Error::InvalidCloseStatusCode),
+            ),
+            (
+                &[0x88, 0x02, 0x03, 0xEC],
+                Some(Error::InvalidCloseStatusCode),
+            ),
+            (
+                &[0x88, 0x02, 0x03, 0xED],
+                Some(Error::InvalidCloseStatusCode),
+            ),
+            (
+                &[0x88, 0x04, 0x03, 0xE8, 0xFF, 0xFF],
+                Some(Error::Utf8Error),
+            ),
+            (&[0x88, 0x00], None),
+            (&[0x88, 0x02, 0x03, 0xE8], None),
+            (&[0x88, 0x02, 0x0B, 0xB8], None),
+            (&[0x88, 0x04, 0x03, 0xE8, b'o', b'k'], None),
+        ] {
+            assert_eq!(read_frames(frame, 1).err(), expected, "{frame:x?}");
+        }
+    }
+
+    #[test]
+    fn payload_of_65535_bytes_uses_a_16_bit_length() {
+        let mut ws_server = WebSocketServer::new_server();
+        ws_server.state = WebSocketState::Open;
+        let payload = std::vec![0; 65535];
+        let mut to = std::vec![0; 65535 + 14];
+        let len = ws_server
+            .write(WebSocketSendMessageType::Binary, true, &payload, &mut to)
+            .unwrap();
+        assert_eq!(len, 65535 + 4);
+        assert_eq!(&to[1..4], &[126, 0xFF, 0xFF]);
+    }
 
     #[test]
     fn oversized_control_frame_is_rejected() {
