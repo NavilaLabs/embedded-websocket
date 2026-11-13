@@ -9,15 +9,15 @@ The library is `no_std` by default. The `std` feature only adds `std::error::Err
 
 ## Framers
 
-The framers let you work with whole websocket messages without dealing with fragmented data. They work with any stream that implements the [embedded-io](https://crates.io/crates/embedded-io) or [embedded-io-async](https://crates.io/crates/embedded-io-async) traits:
+The framers let you work with whole websocket messages without dealing with fragmented data:
 
-* `embedded-io`: the `framer_embedded_io` module works with blocking streams.
-* `embedded-io-async`: the `framer_embedded_io_async` module works with async streams, for example the `TcpSocket` of [embassy-net](https://crates.io/crates/embassy-net).
+* `blocking::Framer` works with any stream that implements the [embedded-io](https://crates.io/crates/embedded-io) traits.
+* `asynch::Framer` works with any stream that implements the [embedded-io-async](https://crates.io/crates/embedded-io-async) traits, for example the `TcpSocket` of [embassy-net](https://crates.io/crates/embassy-net). It needs the `asynch` feature.
 
 Both have the same API.
 
 ```
-embedded-websocket = { version = "x.x.x", features = ["embedded-io-async"] }
+embedded-websocket = { version = "x.x.x", features = ["asynch"] }
 ```
 
 To use a `std` or `tokio` stream, wrap it with `FromStd` or `FromTokio` from [embedded-io-adapters](https://crates.io/crates/embedded-io-adapters).
@@ -31,22 +31,22 @@ The server accepts client connections in a loop and echoes back whatever text a 
 To run the demo web server with the blocking or the async framer:
 
 ```
-cargo run --example server_embedded_io --features embedded-io
-cargo run --example server_embedded_io_async --features embedded-io-async
+cargo run --example server
+cargo run --example server_async --features asynch
 ```
 
 To run the demo websocket client:
 
 ```
-cargo run --example client_embedded_io --features embedded-io
-cargo run --example client_embedded_io_async --features embedded-io-async
+cargo run --example client
+cargo run --example client_async --features asynch
 ```
 
 or open `http://127.0.0.1:1337/` in your browser.
 
 ## Example websocket client usage
 
-The following example, also found [here](./examples/client_embedded_io.rs), performs the opening handshake, sends a short message, initiates a close handshake and waits for the server to complete it.
+The following example, also found [here](./examples/client.rs), performs the opening handshake, sends a short message, initiates a close handshake and waits for the server to complete it.
 
 ```rust
 let stream = TcpStream::connect("127.0.0.1:1337").map_err(FramerError::Io)?;
@@ -80,7 +80,7 @@ while let ReadResult::Text(text) = framer.read(&mut stream, &mut frame_buf)? {
 
 ## Example websocket server usage
 
-The server example is a little too verbose to include in this readme, see the [server example](./examples/server_embedded_io.rs).
+The server example is a little too verbose to include in this readme, see the [server example](./examples/server.rs).
 
 ## License 
 

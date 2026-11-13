@@ -1,15 +1,15 @@
 // The MIT License (MIT)
 // Copyright (c) 2019 David Haig
 
-// Demo websocket client connecting to localhost port 1337 using the embedded-io-async framer.
+// Demo websocket client connecting to localhost port 1337 using the async framer.
 // Any stream implementing the embedded-io-async traits works the same way, for example the
 // TcpSocket of embassy-net. Here a tokio TcpStream is wrapped with embedded-io-adapters.
-// Run with: cargo run --example client_embedded_io_async --features embedded-io-async
+// Run with: cargo run --example client_async --features asynch
 
 use embedded_io_adapters::tokio_1::FromTokio;
 use embedded_websocket::{
-    framer_embedded_io_async::{Framer, FramerError, FramerState, ReadResult},
-    WebSocketClient, WebSocketCloseStatusCode, WebSocketOptions, WebSocketSendMessageType,
+    asynch::Framer, FramerError, FramerState, ReadResult, WebSocketClient,
+    WebSocketCloseStatusCode, WebSocketOptions, WebSocketSendMessageType,
 };
 use std::error::Error;
 use tokio::net::TcpStream;

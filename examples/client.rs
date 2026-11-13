@@ -1,15 +1,15 @@
 // The MIT License (MIT)
 // Copyright (c) 2019 David Haig
 
-// Demo websocket client connecting to localhost port 1337 using the embedded-io framer.
+// Demo websocket client connecting to localhost port 1337 using the blocking framer.
 // Any stream implementing the embedded-io traits works the same way. Here a std TcpStream is
 // wrapped with embedded-io-adapters.
-// Run with: cargo run --example client_embedded_io --features embedded-io
+// Run with: cargo run --example client
 
 use embedded_io_adapters::std::FromStd;
 use embedded_websocket::{
-    framer_embedded_io::{Framer, FramerError, FramerState, ReadResult},
-    WebSocketClient, WebSocketCloseStatusCode, WebSocketOptions, WebSocketSendMessageType,
+    blocking::Framer, FramerError, FramerState, ReadResult, WebSocketClient,
+    WebSocketCloseStatusCode, WebSocketOptions, WebSocketSendMessageType,
 };
 use std::error::Error;
 use std::net::TcpStream;

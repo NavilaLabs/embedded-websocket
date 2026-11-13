@@ -1,8 +1,8 @@
 //! A websocket framer for blocking streams that implement the [`embedded_io`] traits.
 //!
-//! The [`Framer`] reads and writes whole websocket messages and has the same API as
-//! the async [`crate::framer_embedded_io_async::Framer`]. It handles stream reads that return a partial frame, a partial
-//! frame header or multiple frames at once.
+//! The [`Framer`] reads and writes whole websocket messages and has the same API as the
+//! async [`crate::asynch::Framer`]. It handles stream reads that return a partial frame, a
+//! partial frame header or multiple frames at once.
 //!
 //! Any stream that implements [`embedded_io::Read`] and [`embedded_io::Write`] works.
 
@@ -11,11 +11,11 @@ use core::ops::Range;
 use embedded_io::{Read, Write};
 use rand_core::Rng;
 
-pub use crate::framer_core::{FramerError, FramerState, ReadResult};
 use crate::{
     framer_core::{Decoded, FramerCore},
-    WebSocket, WebSocketCloseStatusCode, WebSocketContext, WebSocketOptions,
-    WebSocketSendMessageType, WebSocketState, WebSocketSubProtocol, WebSocketType,
+    FramerError, FramerState, ReadResult, WebSocket, WebSocketCloseStatusCode, WebSocketContext,
+    WebSocketOptions, WebSocketSendMessageType, WebSocketState, WebSocketSubProtocol,
+    WebSocketType,
 };
 
 /// Reads and writes whole websocket messages over a blocking stream.
@@ -31,7 +31,8 @@ use crate::{
 ///
 /// ```no_run
 /// use embedded_websocket::{
-///     framer_embedded_io::{Framer, FramerError, FramerState, ReadResult},
+///     blocking::Framer,
+///     FramerError, FramerState, ReadResult,
 ///     WebSocketClient, WebSocketOptions, WebSocketSendMessageType,
 /// };
 ///
