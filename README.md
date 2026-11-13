@@ -36,9 +36,11 @@ To use a `std` or `tokio` stream, wrap it with `FromStd` or `FromTokio` from [em
 
 A framer works on three buffers you provide, and a `FramerState` that you keep per connection:
 
-* `read_buf` holds received bytes. It must fit the HTTP header of the opening handshake and a control frame (up to 131 bytes). Messages can be larger, they are moved to `frame_buf` piece by piece.
-* `frame_buf` receives a whole message, so it must fit the largest message you accept. Larger messages fail the connection with status 1009.
-* `write_buf` holds encoded frames. Messages larger than it are sent in several frames, so it can be small; a ping, pong or close frame needs up to 131 bytes.
+* `read_buf` holds received bytes. It must fit the HTTP header the other side sends in the opening handshake (a browser request is often 300 to 600 bytes, more with cookies) and a whole control frame (up to 131 bytes). Text and binary messages can be larger, they are moved to `frame_buf` piece by piece.
+* `frame_buf` receives a whole message, so it must fit the largest message you accept, and at least 125 bytes for control frame payloads. Larger messages fail the connection with status 1009.
+* `write_buf` holds what the framer sends. It must fit the HTTP header of your side of the opening handshake (about 130 bytes for a server, 150 bytes plus path, host, origin and extra headers for a client) and a whole control frame (up to 131 bytes), because the framer answers pings by itself. Text and binary messages larger than it are sent in several frames.
+
+Buffer sizes are not checked up front: a buffer that is too small fails the operation that needs the space. 1 KiB each is a safe start.
 
 ### Without a framer
 
