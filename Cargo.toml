@@ -3,6 +3,7 @@ name = "embedded-io-websocket"
 version = "0.1.0"
 authors = ["David Haig", "NavilaLabs"]
 edition = "2021"
+rust-version = "1.87"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/NavilaLabs/embedded-websocket"
 description = "A lightweight no_std websocket library with blocking and async framers for embedded-io streams"

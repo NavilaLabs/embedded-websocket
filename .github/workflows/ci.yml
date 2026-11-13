@@ -24,6 +24,13 @@ jobs:
       - run: cargo clippy --lib --examples --features "${{ matrix.features }}"
       - run: cargo test --features "${{ matrix.features }}"
 
+  msrv:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.87.0
+      - run: cargo build --lib --features std,asynch
+
   no-std:
     runs-on: ubuntu-latest
     steps:
