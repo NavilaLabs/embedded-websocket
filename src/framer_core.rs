@@ -49,14 +49,40 @@ pub(crate) enum Answer<'a> {
     Respond(&'a [u8]),
 }
 
-pub(crate) enum Decoded<E> {
+pub(crate) enum Decoded {
     NeedMoreData,
     SendThenContinue(usize),
-    SendThenReturn(usize, Message),
-    SendThenFail(usize, FramerError<E>),
+    // The result of the read is kept in `FramerState::pending` until the bytes are sent, so a
+    // read interrupted while sending them still returns it.
+    SendThenFinish(usize),
     Message(Message),
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Pending {
+    Message(Message),
+    Failed(Failure),
+}
+
+// A `FramerError` of a protocol violation, which never holds an error of the stream.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Failure {
+    FrameTooLarge(usize),
+    Utf8(Utf8Error),
+    WebSocket(crate::Error),
+}
+
+impl<E> From<Failure> for FramerError<E> {
+    fn from(failure: Failure) -> Self {
+        match failure {
+            Failure::FrameTooLarge(len) => FramerError::FrameTooLarge(len),
+            Failure::Utf8(error) => FramerError::Utf8(error),
+            Failure::WebSocket(error) => FramerError::WebSocket(error),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Message {
     Binary(usize),
     Text(usize),
@@ -101,6 +127,7 @@ pub struct FramerState {
     pub(crate) control_frames: u64,
     // Bytes at the start of the current text message that are known to be valid UTF-8.
     pub(crate) text_checked: usize,
+    pub(crate) pending: Option<Pending>,
 }
 
 impl FramerState {
@@ -112,6 +139,7 @@ impl FramerState {
             unsent: 0..0,
             control_frames: 0,
             text_checked: 0,
+            pending: None,
         }
     }
 
@@ -280,35 +308,63 @@ where
         self.state.read_cursor += len;
     }
 
-    pub(crate) fn decode<E>(&mut self, frame_buf: &mut [u8]) -> Result<Decoded<E>, FramerError<E>> {
+    pub(crate) fn decode<E>(&mut self, frame_buf: &mut [u8]) -> Result<Decoded, FramerError<E>> {
         let error = match self.decode_frames(frame_buf) {
             Err(error) => error,
             decoded => return decoded,
         };
-        let close_status = match &error {
-            FramerError::Utf8(_) | FramerError::WebSocket(crate::Error::Utf8Error) => {
-                WebSocketCloseStatusCode::InvalidPayloadData
-            }
-            FramerError::FrameTooLarge(_) => WebSocketCloseStatusCode::MessageTooBig,
+        let (close_status, failure) = match error {
+            FramerError::Utf8(error) => (
+                WebSocketCloseStatusCode::InvalidPayloadData,
+                Failure::Utf8(error),
+            ),
+            FramerError::WebSocket(crate::Error::Utf8Error) => (
+                WebSocketCloseStatusCode::InvalidPayloadData,
+                Failure::WebSocket(crate::Error::Utf8Error),
+            ),
+            FramerError::FrameTooLarge(len) => (
+                WebSocketCloseStatusCode::MessageTooBig,
+                Failure::FrameTooLarge(len),
+            ),
             FramerError::WebSocket(
-                crate::Error::InvalidOpCode
+                error @ (crate::Error::InvalidOpCode
                 | crate::Error::InvalidFrameLength
                 | crate::Error::InvalidCloseStatusCode
                 | crate::Error::UnexpectedContinuationFrame
                 | crate::Error::ReservedBitsSet
                 | crate::Error::FragmentedControlFrame
-                | crate::Error::UnexpectedDataFrame,
-            ) => WebSocketCloseStatusCode::ProtocolError,
-            _ => return Err(error),
+                | crate::Error::UnexpectedDataFrame),
+            ) => (
+                WebSocketCloseStatusCode::ProtocolError,
+                Failure::WebSocket(error),
+            ),
+            error => return Err(error),
         };
         if self.websocket.state != WebSocketState::Open {
-            return Err(error);
+            return Err(failure.into());
         }
         let len = self.encode_close(close_status, None)?;
-        Ok(Decoded::SendThenFail(len, error))
+        self.state.pending = Some(Pending::Failed(failure));
+        Ok(Decoded::SendThenFinish(len))
     }
 
-    fn decode_frames<E>(&mut self, frame_buf: &mut [u8]) -> Result<Decoded<E>, FramerError<E>> {
+    pub(crate) fn has_pending(&self) -> bool {
+        self.state.pending.is_some()
+    }
+
+    /// Returns the result a read kept while it sent bytes.
+    pub(crate) fn finish<'b, E>(
+        &mut self,
+        frame_buf: &'b [u8],
+    ) -> Result<ReadResult<'b>, FramerError<E>> {
+        match self.state.pending.take() {
+            Some(Pending::Message(message)) => message.into_read_result(frame_buf),
+            Some(Pending::Failed(failure)) => Err(failure.into()),
+            None => Err(FramerError::WebSocket(crate::Error::Unknown)),
+        }
+    }
+
+    fn decode_frames<E>(&mut self, frame_buf: &mut [u8]) -> Result<Decoded, FramerError<E>> {
         loop {
             let buffered = &self.read_buf[..self.state.read_cursor];
             if buffered.is_empty() {
@@ -377,7 +433,8 @@ where
                         true,
                         &frame_buf[payload.clone()],
                     )?;
-                    return Ok(Decoded::SendThenReturn(len, Message::Closed(payload)));
+                    self.state.pending = Some(Pending::Message(Message::Closed(payload)));
+                    return Ok(Decoded::SendThenFinish(len));
                 }
                 WebSocketReceiveMessageType::CloseCompleted => {
                     return Ok(Decoded::Message(Message::Closed(payload)));
@@ -399,7 +456,7 @@ where
         }
     }
 
-    fn need_more_data<E>(&self) -> Result<Decoded<E>, FramerError<E>> {
+    fn need_more_data<E>(&self) -> Result<Decoded, FramerError<E>> {
         if self.state.read_cursor == self.read_buf.len() {
             Err(FramerError::FrameTooLarge(self.read_buf.len()))
         } else {

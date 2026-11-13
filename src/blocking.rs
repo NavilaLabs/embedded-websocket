@@ -304,6 +304,9 @@ where
         S: Read + Write,
     {
         self.send_unsent(stream)?;
+        if self.core.has_pending() {
+            return self.core.finish(frame_buf);
+        }
         loop {
             match self.core.decode(frame_buf)? {
                 Decoded::NeedMoreData => {
@@ -318,13 +321,9 @@ where
                 Decoded::SendThenContinue(len) => {
                     self.send(stream, len)?;
                 }
-                Decoded::SendThenReturn(len, message) => {
+                Decoded::SendThenFinish(len) => {
                     self.send(stream, len)?;
-                    return message.into_read_result(frame_buf);
-                }
-                Decoded::SendThenFail(len, error) => {
-                    self.send(stream, len)?;
-                    return Err(error);
+                    return self.core.finish(frame_buf);
                 }
                 Decoded::Message(message) => return message.into_read_result(frame_buf),
             }
@@ -775,6 +774,77 @@ mod tests {
                 reason: ""
             }
         ));
+    }
+
+    fn read_with_failing_write(
+        frame: Vec<u8>,
+    ) -> (FramerError<Interrupted>, ReadResult<'static>, Vec<u8>) {
+        let mut read_buf = vec![0; 1024];
+        let mut write_buf = vec![0; 1024];
+        let frame_buf = vec![0; 1024].leak();
+        let mut state = FramerState::new();
+        let mut ws_server = WebSocketServer::new_server();
+        ws_server.state = WebSocketState::Open;
+        let mut stream = ScriptedStream::new();
+        stream.chunks.push_back(frame);
+        stream.write_budget = 1;
+
+        let mut framer = Framer::new(&mut read_buf, &mut state, &mut write_buf, &mut ws_server);
+        let first = framer.read(&mut stream, frame_buf).err().unwrap();
+        stream.write_budget = usize::MAX;
+        let mut framer = Framer::new(&mut read_buf, &mut state, &mut write_buf, &mut ws_server);
+        let second = match framer.read(&mut stream, frame_buf) {
+            Ok(result) => result,
+            Err(error) => panic!("second read failed: {error:?}"),
+        };
+        (first, second, stream.written)
+    }
+
+    #[test]
+    fn interrupted_close_reply_still_returns_the_close_status() {
+        let payload = close_payload(1000, "bye");
+        let (first, second, written) = read_with_failing_write(client_frame(
+            &payload,
+            WebSocketOpCode::ConnectionClose,
+            true,
+        ));
+        assert!(matches!(first, FramerError::Io(Interrupted)));
+        assert!(matches!(
+            second,
+            ReadResult::Closed {
+                status: WebSocketCloseStatusCode::NormalClosure,
+                reason: "bye"
+            }
+        ));
+        assert_eq!(written, [&[0x88, 0x05][..], &payload].concat());
+    }
+
+    #[test]
+    fn interrupted_close_after_a_protocol_violation_still_returns_the_violation() {
+        let mut read_buf = vec![0; 1024];
+        let mut write_buf = vec![0; 1024];
+        let mut frame_buf = vec![0; 1024];
+        let mut state = FramerState::new();
+        let mut ws_server = WebSocketServer::new_server();
+        ws_server.state = WebSocketState::Open;
+        let mut stream = ScriptedStream::new();
+        let mut frame = client_frame(b"a", WebSocketOpCode::TextFrame, true);
+        frame[0] |= 0x40;
+        stream.chunks.push_back(frame);
+        stream.write_budget = 1;
+
+        let mut framer = Framer::new(&mut read_buf, &mut state, &mut write_buf, &mut ws_server);
+        assert!(matches!(
+            framer.read(&mut stream, &mut frame_buf),
+            Err(FramerError::Io(Interrupted))
+        ));
+        stream.write_budget = usize::MAX;
+        let mut framer = Framer::new(&mut read_buf, &mut state, &mut write_buf, &mut ws_server);
+        assert!(matches!(
+            framer.read(&mut stream, &mut frame_buf),
+            Err(FramerError::WebSocket(crate::Error::ReservedBitsSet))
+        ));
+        assert_eq!(stream.written, [0x88, 0x02, 0x03, 0xEA]);
     }
 
     #[test]

@@ -4,8 +4,8 @@
 use std::collections::VecDeque;
 
 use embedded_io_websocket::{
-    blocking, FramerError, FramerState, ReadResult, WebSocketClient, WebSocketReceiveMessageType,
-    WebSocketSendMessageType, WebSocketServer, WebSocketState,
+    blocking, FramerError, FramerState, ReadResult, WebSocketClient, WebSocketCloseStatusCode,
+    WebSocketReceiveMessageType, WebSocketSendMessageType, WebSocketServer, WebSocketState,
 };
 use proptest::prelude::*;
 
@@ -31,6 +31,12 @@ impl Message {
     }
 }
 
+#[derive(Debug, Clone, PartialEq)]
+enum End {
+    Closed(u16, String),
+    Disconnected,
+}
+
 #[derive(Debug, Clone)]
 struct Fragment {
     len_percent: usize,
@@ -40,6 +46,7 @@ struct Fragment {
 #[derive(Debug, Clone)]
 struct Conversation {
     messages: Vec<(Message, Vec<Fragment>)>,
+    close: Option<(u16, String)>,
     read_buf_len: usize,
     read_lens: Vec<usize>,
     write_lens: Vec<usize>,
@@ -80,7 +87,26 @@ impl Conversation {
                 start = end;
             }
         }
+        if let Some((status, reason)) = &self.close {
+            let payload = [&status.to_be_bytes()[..], reason.as_bytes()].concat();
+            let len = ws_client
+                .write(
+                    WebSocketSendMessageType::CloseReply,
+                    true,
+                    &payload,
+                    &mut frame,
+                )
+                .unwrap();
+            encoded.extend_from_slice(&frame[..len]);
+        }
         encoded
+    }
+
+    fn end(&self) -> End {
+        match &self.close {
+            Some((status, reason)) => End::Closed(*status, reason.clone()),
+            None => End::Disconnected,
+        }
     }
 
     fn pings(&self) -> Vec<Vec<u8>> {
@@ -124,14 +150,19 @@ fn fragment() -> impl Strategy<Value = Fragment> {
 fn conversation() -> impl Strategy<Value = Conversation> {
     (
         prop::collection::vec((message(), prop::collection::vec(fragment(), 1..4)), 1..6),
+        prop::option::of((
+            prop::sample::select(vec![1000u16, 1001, 1008, 1011, 3000, 4999]),
+            "[a-z ]{0,30}",
+        )),
         140usize..512,
         prop::collection::vec(1usize..300, 1..20),
         prop::collection::vec(1usize..300, 1..20),
         prop::collection::vec(prop::bool::weighted(0.2), 1..20),
     )
         .prop_map(
-            |(messages, read_buf_len, read_lens, write_lens, interruptions)| Conversation {
+            |(messages, close, read_buf_len, read_lens, write_lens, interruptions)| Conversation {
                 messages,
+                close,
                 read_buf_len,
                 read_lens,
                 write_lens,
@@ -207,8 +238,17 @@ impl ChunkedStream {
         let mut payload = vec![0; 256];
         while !from.is_empty() {
             let result = ws_client.read(from, &mut payload).unwrap();
-            assert_eq!(result.message_type, WebSocketReceiveMessageType::Pong);
-            pongs.push(payload[..result.len_to].to_vec());
+            match result.message_type {
+                WebSocketReceiveMessageType::Pong => pongs.push(payload[..result.len_to].to_vec()),
+                WebSocketReceiveMessageType::CloseMustReply => {
+                    assert_eq!(
+                        result.len_from,
+                        from.len(),
+                        "the close reply is the last frame"
+                    );
+                }
+                other => panic!("unexpected {other:?}"),
+            }
             from = &from[result.len_from..];
         }
         pongs
@@ -241,13 +281,26 @@ impl embedded_io::Write for ChunkedStream {
     }
 }
 
-fn received(result: ReadResult<'_>) -> Option<Message> {
+fn received(result: ReadResult<'_>) -> Result<Message, End> {
     match result {
-        ReadResult::Text(text) => Some(Message::Text(text.to_owned())),
-        ReadResult::Binary(binary) => Some(Message::Binary(binary.to_vec())),
+        ReadResult::Text(text) => Ok(Message::Text(text.to_owned())),
+        ReadResult::Binary(binary) => Ok(Message::Binary(binary.to_vec())),
         ReadResult::Pong(_) => panic!("the client sends no pongs"),
-        ReadResult::Closed { .. } => panic!("the client sends no close frame"),
-        ReadResult::Disconnected => None,
+        ReadResult::Closed { status, reason } => {
+            Err(End::Closed(status_code(status), reason.to_owned()))
+        }
+        ReadResult::Disconnected => Err(End::Disconnected),
+    }
+}
+
+fn status_code(status: WebSocketCloseStatusCode) -> u16 {
+    match status {
+        WebSocketCloseStatusCode::NormalClosure => 1000,
+        WebSocketCloseStatusCode::EndpointUnavailable => 1001,
+        WebSocketCloseStatusCode::PolicyViolation => 1008,
+        WebSocketCloseStatusCode::InternalServerError => 1011,
+        WebSocketCloseStatusCode::Custom(code) => code,
+        other => panic!("unexpected {other:?}"),
     }
 }
 
@@ -271,20 +324,21 @@ proptest! {
         ws_server.state = WebSocketState::Open;
 
         let mut messages = Vec::new();
-        loop {
+        let end = loop {
             let mut framer =
                 blocking::Framer::new(&mut read_buf, &mut state, &mut write_buf, &mut ws_server);
             match framer.read(&mut stream, &mut frame_buf) {
                 Ok(result) => match received(result) {
-                    Some(message) => messages.push(message),
-                    None => break,
+                    Ok(message) => messages.push(message),
+                    Err(end) => break end,
                 },
                 Err(FramerError::Io(Interrupted)) => {}
                 Err(error) => panic!("read failed: {error:?}"),
             }
-        }
+        };
 
         prop_assert_eq!(messages, expected(&conversation));
+        prop_assert_eq!(end, conversation.end());
         prop_assert_eq!(stream.pongs(), conversation.pings());
     }
 }
@@ -355,20 +409,21 @@ mod asynch {
             ws_server.state = WebSocketState::Open;
 
             let mut messages = Vec::new();
-            loop {
+            let end = loop {
                 let mut framer =
                     Framer::new(&mut read_buf, &mut state, &mut write_buf, &mut ws_server);
                 match poll_once(framer.read(&mut stream, &mut frame_buf)) {
                     Poll::Ready(Ok(result)) => match received(result) {
-                        Some(message) => messages.push(message),
-                        None => break,
+                        Ok(message) => messages.push(message),
+                        Err(end) => break end,
                     },
                     Poll::Ready(Err(error)) => panic!("read failed: {error:?}"),
                     Poll::Pending => {}
                 }
-            }
+            };
 
             prop_assert_eq!(messages, expected(&conversation));
+            prop_assert_eq!(end, conversation.end());
             prop_assert_eq!(stream.pongs(), conversation.pings());
         }
     }

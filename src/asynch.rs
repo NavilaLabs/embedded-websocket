@@ -312,6 +312,9 @@ where
         S: Read + Write,
     {
         self.send_unsent(stream).await?;
+        if self.core.has_pending() {
+            return self.core.finish(frame_buf);
+        }
         loop {
             match self.core.decode(frame_buf)? {
                 Decoded::NeedMoreData => {
@@ -327,13 +330,9 @@ where
                 Decoded::SendThenContinue(len) => {
                     self.send(stream, len).await?;
                 }
-                Decoded::SendThenReturn(len, message) => {
+                Decoded::SendThenFinish(len) => {
                     self.send(stream, len).await?;
-                    return message.into_read_result(frame_buf);
-                }
-                Decoded::SendThenFail(len, error) => {
-                    self.send(stream, len).await?;
-                    return Err(error);
+                    return self.core.finish(frame_buf);
                 }
                 Decoded::Message(message) => return message.into_read_result(frame_buf),
             }

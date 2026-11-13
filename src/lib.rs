@@ -197,7 +197,7 @@ pub enum WebSocketState {
 }
 
 /// Websocket specific errors
-#[derive(PartialEq, Eq, Debug)]
+#[derive(PartialEq, Eq, Debug, Clone)]
 pub enum Error {
     /// Websocket frame has an invalid opcode
     InvalidOpCode,
