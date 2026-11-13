@@ -7,7 +7,7 @@
 // Run with: cargo run --example client
 
 use embedded_io_adapters::std::FromStd;
-use embedded_websocket::{
+use embedded_io_websocket::{
     blocking::Framer, FramerError, FramerState, ReadResult, WebSocketClient,
     WebSocketCloseStatusCode, WebSocketOptions, WebSocketSendMessageType,
 };

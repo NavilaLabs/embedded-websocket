@@ -31,7 +31,7 @@ use crate::{
 /// # Examples
 ///
 /// ```no_run
-/// use embedded_websocket::{
+/// use embedded_io_websocket::{
 ///     asynch::Framer,
 ///     FramerError, FramerState, ReadResult,
 ///     WebSocketClient, WebSocketOptions, WebSocketSendMessageType,

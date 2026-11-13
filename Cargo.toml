@@ -1,12 +1,12 @@
 [package]
-name = "embedded-websocket"
-version = "0.9.5"
-authors = ["David Haig"]
+name = "embedded-io-websocket"
+version = "0.1.0"
+authors = ["David Haig", "NavilaLabs"]
 edition = "2021"
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/ninjasource/embedded-websockets.git"
-description = "A lightweight websocket library for embedded systems (no_std)"
-keywords = ["websockets", "websocket", "embedded", "no_std"]
+repository = "https://github.com/NavilaLabs/embedded-websocket"
+description = "A lightweight no_std websocket library with blocking and async framers for embedded-io streams"
+keywords = ["websocket", "embedded", "no_std", "embedded-io"]
 categories = ["embedded", "no-std", "network-programming"]
 readme = "README.md"
 

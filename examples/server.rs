@@ -16,7 +16,7 @@ use embedded_io::{Read, Write};
 use embedded_io_adapters::std::FromStd;
 use std::net::{TcpListener, TcpStream};
 
-use embedded_websocket::{
+use embedded_io_websocket::{
     self as ws, blocking::Framer, FramerError, FramerState, ReadResult, WebSocketContext,
     WebSocketSendMessageType, WebSocketServer,
 };

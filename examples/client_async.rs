@@ -7,7 +7,7 @@
 // Run with: cargo run --example client_async --features asynch
 
 use embedded_io_adapters::tokio_1::FromTokio;
-use embedded_websocket::{
+use embedded_io_websocket::{
     asynch::Framer, FramerError, FramerState, ReadResult, WebSocketClient,
     WebSocketCloseStatusCode, WebSocketOptions, WebSocketSendMessageType,
 };

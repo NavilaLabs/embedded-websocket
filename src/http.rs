@@ -15,7 +15,7 @@ pub struct WebSocketContext {
 ///
 /// # Examples
 /// ```
-/// use embedded_websocket as ws;
+/// use embedded_io_websocket as ws;
 /// let client_request = "GET /chat HTTP/1.1
 /// Host: myserver.example.com
 /// Upgrade: websocket

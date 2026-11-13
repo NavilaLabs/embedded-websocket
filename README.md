@@ -1,5 +1,7 @@
-# embedded-websocket
-A lightweight rust websocket library for embedded systems `no_std`
+# embedded-io-websocket
+A lightweight rust websocket library for embedded systems `no_std`, with blocking and async framers for [embedded-io](https://crates.io/crates/embedded-io) streams.
+
+This crate started as a fork of [embedded-websocket](https://github.com/ninjasource/embedded-websocket) by David Haig.
 
 This library facilitates the encoding and decoding of websocket messages and can be used for both clients and servers. The library is intended to be used in constrained memory environments like embedded microcontrollers which cannot reference the rust standard library. The library will work with arbitrarily small buffers regardless of websocket frame size as long as the websocket header can be read (2 - 14 bytes depending)
 
@@ -17,7 +19,7 @@ The framers let you work with whole websocket messages without dealing with frag
 Both have the same API.
 
 ```
-embedded-websocket = { version = "x.x.x", features = ["asynch"] }
+embedded-io-websocket = { version = "x.x.x", features = ["asynch"] }
 ```
 
 To use a `std` or `tokio` stream, wrap it with `FromStd` or `FromTokio` from [embedded-io-adapters](https://crates.io/crates/embedded-io-adapters).

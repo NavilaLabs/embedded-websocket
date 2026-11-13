@@ -16,7 +16,7 @@ use embedded_io_adapters::tokio_1::FromTokio;
 use embedded_io_async::{Read, Write};
 use tokio::net::{TcpListener, TcpStream};
 
-use embedded_websocket::{
+use embedded_io_websocket::{
     self as ws, asynch::Framer, FramerError, FramerState, ReadResult, WebSocketContext,
     WebSocketSendMessageType, WebSocketServer,
 };

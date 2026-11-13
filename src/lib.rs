@@ -1,6 +1,6 @@
-//! # Embedded Websocket
+//! # Embedded IO Websocket
 //!
-//! `embedded_websocket` facilitates the encoding and decoding of websocket frames and can be used
+//! `embedded_io_websocket` facilitates the encoding and decoding of websocket frames and can be used
 //! for both clients and servers. The library is intended to be used in constrained memory
 //! environments like embedded microcontrollers which cannot reference the rust standard library.
 //! It will work with arbitrarily small buffers regardless of websocket frame size as long as the
@@ -370,7 +370,7 @@ where
     ///
     /// # Examples
     /// ```
-    /// use embedded_websocket as ws;
+    /// use embedded_io_websocket as ws;
     /// use rand;
     /// let mut ws_client = ws::WebSocketClient::new_client(rand::rng());
     ///
@@ -394,7 +394,7 @@ where
     ///
     /// # Examples
     /// ```
-    /// use embedded_websocket as ws;
+    /// use embedded_io_websocket as ws;
     /// let mut ws_server = ws::WebSocketServer::new_server();
     ///
     /// assert_eq!(ws::WebSocketState::None, ws_server.state);
@@ -425,7 +425,7 @@ where
     /// # Examples
     ///
     /// ```
-    /// use embedded_websocket as ws;
+    /// use embedded_io_websocket as ws;
     /// let mut buffer: [u8; 1000] = [0; 1000];
     /// let mut ws_server = ws::WebSocketServer::new_server();
     /// let ws_key = ws::WebSocketKey::try_from("Z7OY1UwHOx/nkSz38kfPwg==").unwrap();
@@ -479,7 +479,7 @@ where
     ///
     /// # Examples
     /// ```
-    /// use embedded_websocket as ws;
+    /// use embedded_io_websocket as ws;
     /// let mut buffer: [u8; 2000] = [0; 2000];
     /// let mut ws_client = ws::WebSocketClient::new_client(rand::rng());
     /// let sub_protocols = ["chat", "superchat"];
@@ -531,7 +531,7 @@ where
     /// the server will choose one (or none) and you get that in the result
     /// # Examples
     /// ```
-    /// use embedded_websocket as ws;
+    /// use embedded_io_websocket as ws;
     /// let mut ws_client = ws::WebSocketClient::new_client(rand::rng());
     /// let ws_key = ws::WebSocketKey::try_from("Z7OY1UwHOx/nkSz38kfPwg==").unwrap();
     /// let server_response_html = "HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Protocol: chat\r\nSec-WebSocket-Accept: ptPnPeDOTo6khJlzmLhOZSh2tAY=\r\n\r\n";    ///
@@ -594,7 +594,7 @@ where
     /// # Examples
     ///
     /// ```
-    /// use embedded_websocket as ws;
+    /// use embedded_io_websocket as ws;
     /// //                    h   e   l   l   o
     /// let buffer1 = [129,5,104,101,108,108,111];
     /// let mut buffer2: [u8; 128] = [0; 128];
@@ -657,7 +657,7 @@ where
     /// # Examples
     ///
     /// ```
-    /// use embedded_websocket as ws;
+    /// use embedded_io_websocket as ws;
     /// let mut buffer: [u8; 1000] = [0; 1000];
     /// let mut ws_server = ws::WebSocketServer::new_server();
     /// ws_server.state = ws::WebSocketState::Open; // skip the opening handshake
