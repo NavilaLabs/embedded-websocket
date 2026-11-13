@@ -167,6 +167,7 @@ where
             read_cursor,
             frame_cursor,
             unsent,
+            ..
         } = state;
         Self {
             core: FramerCore::resume(read_buf, read_cursor, frame_cursor, write_buf, websocket),
