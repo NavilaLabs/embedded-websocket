@@ -3,28 +3,46 @@ A lightweight rust websocket library for embedded systems `no_std`, with blockin
 
 This crate started as a fork of [embedded-websocket](https://github.com/ninjasource/embedded-websocket) by David Haig.
 
-This library facilitates the encoding and decoding of websocket messages and can be used for both clients and servers. The library is intended to be used in constrained memory environments like embedded microcontrollers which cannot reference the rust standard library. The library will work with arbitrarily small buffers regardless of websocket frame size as long as the websocket header can be read (2 - 14 bytes depending)
+It works for clients and servers, allocates nothing and needs no standard library. It passes all cases of the [Autobahn testsuite](https://github.com/crossbario/autobahn-testsuite) except compression, which it does not support.
 
-## no_std support
+```
+embedded-io-websocket = { version = "x.x.x", features = ["asynch"] }
+```
 
-The library is `no_std` by default. The `std` feature only adds `std::error::Error` implementations.
+## Features
+
+* `asynch`: the async framer for [embedded-io-async](https://crates.io/crates/embedded-io-async) streams.
+* `std`: implements `std::error::Error` for the error types. Without it the crate is `no_std`.
+
+The minimum supported Rust version is 1.87.
 
 ## Framers
 
 The framers let you work with whole websocket messages without dealing with fragmented data:
 
 * `blocking::Framer` works with any stream that implements the [embedded-io](https://crates.io/crates/embedded-io) traits.
-* `asynch::Framer` works with any stream that implements the [embedded-io-async](https://crates.io/crates/embedded-io-async) traits, for example the `TcpSocket` of [embassy-net](https://crates.io/crates/embassy-net). It needs the `asynch` feature.
+* `asynch::Framer` works with any stream that implements the [embedded-io-async](https://crates.io/crates/embedded-io-async) traits, for example the `TcpSocket` of [embassy-net](https://crates.io/crates/embassy-net).
 
-Both have the same API. They split messages that do not fit into the write buffer into several frames, and a read or write that fails or is cancelled can be called again to continue where it stopped.
+Both have the same API:
 
-```
-embedded-io-websocket = { version = "x.x.x", features = ["asynch"] }
-```
+* `connect` and `accept` perform the opening handshake of the client and the server.
+* `read` returns whole text and binary messages, answers pings and completes a close handshake the other party starts. It returns `Closed` with the status and reason of the other party when the close handshake is complete, and `Disconnected` when the stream ended before. If the other party violates the protocol, the framer closes the connection with the matching status code and returns the error.
+* `write` splits messages that do not fit into the write buffer into several frames.
+* A `read` or `write` that fails, or is cancelled in the async framer, can be called again to continue where it stopped. Call `write` again with the same message before writing another one.
 
 To use a `std` or `tokio` stream, wrap it with `FromStd` or `FromTokio` from [embedded-io-adapters](https://crates.io/crates/embedded-io-adapters).
 
-Without a framer, `WebSocketClient` and `WebSocketServer` encode and decode frames on byte slices, so you can use any transport.
+### Buffers
+
+A framer works on three buffers you provide, and a `FramerState` that you keep per connection:
+
+* `read_buf` holds received bytes. It must fit the HTTP header of the opening handshake and a control frame (up to 131 bytes). Messages can be larger, they are moved to `frame_buf` piece by piece.
+* `frame_buf` receives a whole message, so it must fit the largest message you accept. Larger messages fail the connection with status 1009.
+* `write_buf` holds encoded frames. Messages larger than it are sent in several frames, so it can be small; a ping, pong or close frame needs up to 131 bytes.
+
+### Without a framer
+
+`WebSocketClient` and `WebSocketServer` encode and decode handshakes and frames on byte slices, so they work with any transport and arbitrarily small buffers, as long as a frame header (2 to 14 bytes) fits.
 
 ## Running the examples
 
@@ -109,6 +127,15 @@ while let ReadResult::Text(text) = framer.read(&mut stream, &mut frame_buf)? {
 
 `request` also gives access to the headers, for example to check `Origin` or an authentication token, and tells whether the client offered a sub protocol.
 
-## License 
+## Testing
+
+```
+cargo test --features asynch
+autobahn/run.sh
+```
+
+`autobahn/run.sh` runs the Autobahn testsuite against an echo server and an echo client built on the blocking framer. It needs Docker and jq.
+
+## License
 
 Licensed under either MIT or Apache-2.0 at your option
