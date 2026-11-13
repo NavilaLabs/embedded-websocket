@@ -84,6 +84,28 @@ pub use self::framer_core::{
 };
 pub use self::request::{Decision, Request};
 
+/// Entry points for the fuzz targets in `fuzz/`; not part of the API.
+#[cfg(fuzzing)]
+#[doc(hidden)]
+pub mod fuzzing {
+    use crate::{request::Request, Result, WebSocketKey};
+
+    /// See `head::head_len`.
+    pub fn head_len(buf: &[u8], searched: &mut usize) -> Option<usize> {
+        crate::head::head_len(buf, searched)
+    }
+
+    /// See `Request::parse`.
+    pub fn parse_request(head: &[u8]) -> Result<Request<'_>> {
+        Request::parse(head)
+    }
+
+    /// See `Request::upgrade_key`.
+    pub fn upgrade_key(request: &Request<'_>) -> core::result::Result<WebSocketKey, &'static [u8]> {
+        request.upgrade_key()
+    }
+}
+
 const MASK_KEY_LEN: usize = 4;
 const MAX_CONTROL_FRAME_PAYLOAD_LEN: usize = 125;
 
@@ -1118,6 +1140,21 @@ fn read_frame(
         None
     };
 
+    // a control frame is decoded whole: its payload is answered or validated as one piece
+    if is_control_frame {
+        // RFC 6455 section 5.5
+        if len > MAX_CONTROL_FRAME_PAYLOAD_LEN {
+            return Err(Error::InvalidFrameLength);
+        }
+        let mask_len = if is_mask_bit_set { MASK_KEY_LEN } else { 0 };
+        if from_buffer.len() - mask_len < len {
+            return Err(Error::ReadFrameIncomplete);
+        }
+        if to_buffer.len() < len {
+            return Err(Error::WriteToBufferTooSmall);
+        }
+    }
+
     let len_read = if is_mask_bit_set {
         let from_buffer = &from_buffer[MASK_KEY_LEN..];
         read_into_buffer(&mut mask_key, from_buffer, to_buffer, len)
@@ -1202,14 +1239,26 @@ fn read_length(byte2: u8, from_buffer: &[u8]) -> Result<(usize, usize)> {
         }
         let mut buf: [u8; 2] = [0; 2];
         buf.copy_from_slice(&from_buffer[..2]);
-        return Ok((u16::from_be_bytes(buf) as usize, 2));
+        let len = u16::from_be_bytes(buf);
+        // RFC 6455 section 5.2: the length uses the fewest bytes possible
+        if len < 126 {
+            return Err(Error::InvalidFrameLength);
+        }
+        return Ok((len as usize, 2));
     } else if len == 127 {
         if from_buffer.len() < 8 {
             return Err(Error::ReadFrameIncomplete);
         }
         let mut buf: [u8; 8] = [0; 8];
         buf.copy_from_slice(&from_buffer[..8]);
-        return Ok((u64::from_be_bytes(buf) as usize, 8));
+        let len = u64::from_be_bytes(buf);
+        // RFC 6455 section 5.2: the fewest bytes possible, and the most significant bit is 0
+        if len <= u64::from(u16::MAX) || len >> 63 != 0 {
+            return Err(Error::InvalidFrameLength);
+        }
+        // a length the target cannot address must not wrap around
+        let len = usize::try_from(len).map_err(|_| Error::InvalidFrameLength)?;
+        return Ok((len, 8));
     }
 
     Err(Error::InvalidFrameLength)
@@ -1295,6 +1344,55 @@ mod tests {
             .read(&[0x81, 0x81, 1, 2, 3, 4, b'a' ^ 1], &mut to)
             .unwrap();
         assert_eq!(&to[..result.len_to], b"a");
+    }
+
+    #[test]
+    fn control_frame_waits_for_its_whole_payload() {
+        for frame in [&[0x88, 0x09, b'A', 0, 0][..], &[0x89, 0x05, b'p', b'i']] {
+            assert_eq!(
+                read_frames(frame, 1).err(),
+                Some(Error::ReadFrameIncomplete),
+                "{frame:x?}"
+            );
+        }
+    }
+
+    #[test]
+    fn control_frame_longer_than_125_bytes_is_rejected() {
+        let frame = [&[0x89, 126, 0, 126][..], &[0; 126]].concat();
+        assert_eq!(
+            read_frames(&frame, 1).err(),
+            Some(Error::InvalidFrameLength)
+        );
+    }
+
+    #[test]
+    fn length_must_use_the_minimal_encoding() {
+        for header in [
+            &[0x82, 126, 0, 125][..],
+            &[0x82, 127, 0, 0, 0, 0, 0, 0, 0xFF, 0xFF],
+            &[0x82, 127, 0x80, 0, 0, 0, 0, 1, 0, 0],
+        ] {
+            assert_eq!(
+                read_frames(header, 1).err(),
+                Some(Error::InvalidFrameLength),
+                "{header:x?}"
+            );
+        }
+        assert!(read_frames(&[0x82, 126, 0, 126], 1).is_ok());
+    }
+
+    #[test]
+    fn control_frame_payload_must_fit_into_the_output() {
+        let mut ws_client = WebSocketClient::new_client(rand::rng());
+        ws_client.state = WebSocketState::Open;
+        let mut to = [0; 2];
+        assert_eq!(
+            ws_client
+                .read(&[0x89, 0x03, b'a', b'b', b'c'], &mut to)
+                .err(),
+            Some(Error::WriteToBufferTooSmall)
+        );
     }
 
     #[test]

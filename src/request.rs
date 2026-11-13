@@ -1,5 +1,7 @@
 use core::str;
 
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
+
 use crate::{
     head::{is_token_byte, Head},
     Error, Result, WebSocketKey, WebSocketSubProtocol,
@@ -66,7 +68,7 @@ impl<'a> Request<'a> {
         }
         self.header("sec-websocket-key")
             .and_then(|key| str::from_utf8(key).ok())
-            .filter(|key| key.len() == 24)
+            .filter(|key| is_sixteen_base64_encoded_bytes(key))
             .and_then(|key| WebSocketKey::try_from(key).ok())
             .ok_or(BAD_REQUEST)
     }
@@ -77,6 +79,12 @@ impl<'a> Request<'a> {
         }
         WebSocketSubProtocol::try_from(protocol).map_err(|_| Error::SubProtocolNotOffered)
     }
+}
+
+fn is_sixteen_base64_encoded_bytes(key: &str) -> bool {
+    // two bytes more than a valid key needs, so a longer key does not fit
+    let mut decoded = [0; 18];
+    key.len() == 24 && BASE64.decode_slice(key, &mut decoded) == Ok(16)
 }
 
 /// How a server answers the HTTP request that opens a connection.
@@ -92,4 +100,41 @@ pub enum Decision<'a> {
     /// Sends this complete HTTP response, for example a `404 Not Found` or a web page, and does
     /// not open a websocket.
     Respond(&'a [u8]),
+}
+
+#[cfg(test)]
+mod tests {
+    extern crate std;
+
+    use std::format;
+
+    use super::*;
+
+    fn upgrade_key_of(key: &str) -> core::result::Result<WebSocketKey, &'static [u8]> {
+        let head = format!(
+            "GET / HTTP/1.1\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\
+             Sec-WebSocket-Version: 13\r\nSec-WebSocket-Key: {key}\r\n\r\n"
+        );
+        Request::parse(head.as_bytes()).unwrap().upgrade_key()
+    }
+
+    #[test]
+    fn key_of_16_base64_encoded_bytes_is_accepted() {
+        assert_eq!(
+            upgrade_key_of("dGhlIHNhbXBsZSBub25jZQ==").unwrap(),
+            "dGhlIHNhbXBsZSBub25jZQ=="
+        );
+    }
+
+    #[test]
+    fn key_that_is_not_16_base64_encoded_bytes_is_rejected() {
+        for key in [
+            "dGhlIHNhbXBsZSBub25jZ=Q",
+            "dGhlIHNhbXBsZSBub25jZQ!!",
+            "AAAAAAAAAAAAAAAAAAAAAAA=",
+            "dGhlIHNhbXBsZSBub25jZR==",
+        ] {
+            assert_eq!(upgrade_key_of(key), Err(BAD_REQUEST), "{key}");
+        }
+    }
 }
