@@ -234,3 +234,16 @@ mod capacity_tests {
         assert_eq!(context.sec_websocket_protocol_list[0], "chat");
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn accept_string_matches_the_rfc_6455_example() {
+        let key = WebSocketKey::try_from("dGhlIHNhbXBsZSBub25jZQ==").unwrap();
+        let mut output = [0; 28];
+        build_accept_string(&key, &mut output).unwrap();
+        assert_eq!(&output, b"s3pPLMBiTxaQ9kYGzzhZRbK+xOo=");
+    }
+}
