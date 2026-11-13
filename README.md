@@ -29,6 +29,7 @@ Both have the same API:
 * `read` returns whole text and binary messages, answers pings and completes a close handshake the other party starts. It returns `Closed` with the status and reason of the other party when the close handshake is complete, and `Disconnected` when the stream ended before. If the other party violates the protocol, the framer closes the connection with the matching status code and returns the error.
 * `read_chunk` reads messages larger than `frame_buf` in chunks of up to `frame_buf` bytes, for example to stream a firmware image to flash. Text chunks end at character boundaries, so each one is a valid `&str`. Once a chunk of a message was returned, read the rest of it with `read_chunk` as well.
 * `write` splits messages that do not fit into the write buffer into several frames.
+* `asynch::Reader` and `asynch::Writer` split a connection after the opening handshake, so one task reads while another writes. They share the write side through a lock: `LocalMutex` for tasks on one executor, or your own `Lock` implementation around a mutex such as `embassy_sync::mutex::Mutex`. The reader still answers pings, and the writer releases the lock between the frames of a long message.
 * A `read`, `read_chunk` or `write` that fails, or is cancelled in the async framer, can be called again to continue where it stopped. Call `write` again with the same message before writing another one.
 
 To use a `std` or `tokio` stream, wrap it with `FromStd` or `FromTokio` from [embedded-io-adapters](https://crates.io/crates/embedded-io-adapters).

@@ -472,6 +472,11 @@ where
         Ok(Some(len))
     }
 
+    #[cfg(feature = "asynch")]
+    pub(crate) fn all_frames_queued(&self) -> bool {
+        matches!(&self.state.writing, Some(progress) if progress.has_started && progress.queued == progress.len)
+    }
+
     // The largest payload whose frame fits into the write buffer (RFC 6455 section 5.2).
     fn max_frame_payload(&self) -> usize {
         let mask_len = if self.websocket.is_client {
@@ -490,10 +495,16 @@ where
     }
 
     pub(crate) fn read_space<E>(&mut self) -> Result<&mut [u8], FramerError<E>> {
+        let start = self.read_space_start()?;
+        Ok(&mut self.read_buf[start..])
+    }
+
+    // The index where the free space of `read_buf` starts.
+    pub(crate) fn read_space_start<E>(&self) -> Result<usize, FramerError<E>> {
         if self.state.read_cursor == self.read_buf.len() {
             return Err(FramerError::FrameTooLarge(self.read_buf.len()));
         }
-        Ok(&mut self.read_buf[self.state.read_cursor..])
+        Ok(self.state.read_cursor)
     }
 
     pub(crate) fn commit_read(&mut self, len: usize) {

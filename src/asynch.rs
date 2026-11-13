@@ -6,6 +6,54 @@
 //!
 //! Any stream that implements [`embedded_io_async::Read`] and [`embedded_io_async::Write`]
 //! works, for example the `TcpSocket` of `embassy-net`.
+//!
+//! # Reading and writing at the same time
+//!
+//! After the opening handshake, a [`Reader`] and a [`Writer`] can replace the framer, so one
+//! task waits for messages while another one sends. They share the write side of the
+//! connection through a [`Lock`], because the reader answers pings and close handshakes itself.
+//!
+//! ```no_run
+//! use embedded_io_websocket::{
+//!     asynch::{LocalMutex, Reader, Shared, Writer},
+//!     FramerError, FramerState, ReadResult, WebSocketServer, WebSocketSendMessageType,
+//! };
+//!
+//! async fn run<R, W>(reader_stream: R, writer_stream: W) -> Result<(), FramerError<W::Error>>
+//! where
+//!     R: embedded_io_async::Read<Error = W::Error>,
+//!     W: embedded_io_async::Write,
+//! {
+//!     let (mut read_buf, mut write_buf, mut frame_buf) = ([0; 1024], [0; 1024], [0; 1024]);
+//!     let mut state = FramerState::new();
+//!     let mut websocket = WebSocketServer::new_server();
+//!     // perform the opening handshake with a `Framer` on the same buffers first
+//!
+//!     let shared = LocalMutex::new(Shared::new(
+//!         writer_stream,
+//!         &mut state,
+//!         &mut write_buf,
+//!         &mut websocket,
+//!     ));
+//!     let mut reader = Reader::new(&mut read_buf, reader_stream, &shared);
+//!     let mut writer = Writer::new(&shared);
+//!
+//!     // run these concurrently, for example with `embassy_futures::join::join`
+//!     let read_all = async {
+//!         while let ReadResult::Text(text) = reader.read(&mut frame_buf).await? {
+//!             println!("{text}");
+//!         }
+//!         Ok::<_, FramerError<W::Error>>(())
+//!     };
+//!     let greet = writer.write(WebSocketSendMessageType::Text, true, b"hello");
+//!     # let _ = (read_all, greet);
+//!     Ok(())
+//! }
+//! ```
+
+mod split;
+
+pub use split::{LocalGuard, LocalMutex, Lock, Reader, Shared, Writer};
 
 use embedded_io_async::{Read, Write};
 use rand_core::Rng;
@@ -96,9 +144,9 @@ where
     where
         S: Read + Write,
     {
-        self.send_unsent(stream).await?;
+        send_unsent(&mut self.core, stream).await?;
         let (len, web_socket_key) = self.core.encode_connect(websocket_options)?;
-        self.send(stream, len).await?;
+        send(&mut self.core, stream, len).await?;
 
         let mut searched = 0;
         loop {
@@ -162,7 +210,7 @@ where
     where
         S: Read + Write,
     {
-        self.send_unsent(stream).await?;
+        send_unsent(&mut self.core, stream).await?;
         let mut searched = 0;
         let head_len = loop {
             if let Some(len) = self.core.head_len(&mut searched) {
@@ -191,7 +239,7 @@ where
         };
         match answer {
             Answer::Accept(len) => {
-                self.send(stream, len).await?;
+                send(&mut self.core, stream, len).await?;
                 Ok(true)
             }
             Answer::Respond(response) => {
@@ -251,9 +299,9 @@ where
     where
         S: Write,
     {
-        self.send_unsent(stream).await?;
+        send_unsent(&mut self.core, stream).await?;
         let len = self.core.encode_close(close_status, status_description)?;
-        self.send(stream, len).await
+        send(&mut self.core, stream, len).await
     }
 
     /// Writes `frame_buf` to the stream.
@@ -290,7 +338,7 @@ where
     where
         S: Write,
     {
-        self.send_unsent(stream).await?;
+        send_unsent(&mut self.core, stream).await?;
         if !matches!(
             message_type,
             WebSocketSendMessageType::Text | WebSocketSendMessageType::Binary
@@ -298,13 +346,13 @@ where
             let len = self
                 .core
                 .encode_write(message_type, end_of_message, frame_buf)?;
-            return self.send(stream, len).await;
+            return send(&mut self.core, stream, len).await;
         }
         while let Some(len) =
             self.core
                 .encode_next_frame(message_type, end_of_message, frame_buf)?
         {
-            self.send(stream, len).await?;
+            send(&mut self.core, stream, len).await?;
         }
         Ok(())
     }
@@ -380,7 +428,7 @@ where
     where
         S: Read + Write,
     {
-        self.send_unsent(stream).await?;
+        send_unsent(&mut self.core, stream).await?;
         if self.core.has_pending() {
             return self.core.finish();
         }
@@ -397,42 +445,51 @@ where
                     self.core.commit_read(len);
                 }
                 Decoded::SendThenContinue(len) => {
-                    self.send(stream, len).await?;
+                    send(&mut self.core, stream, len).await?;
                 }
                 Decoded::SendThenFinish(len) => {
-                    self.send(stream, len).await?;
+                    send(&mut self.core, stream, len).await?;
                     return self.core.finish();
                 }
                 Decoded::Message(message) => return Ok(message),
             }
         }
     }
+}
 
-    async fn send<S: Write>(
-        &mut self,
-        stream: &mut S,
-        len: usize,
-    ) -> Result<(), FramerError<S::Error>> {
-        self.core.queue_unsent(len);
-        self.send_unsent(stream).await
-    }
+async fn send<W, TRng, TWebSocketType>(
+    core: &mut FramerCore<'_, TRng, TWebSocketType>,
+    stream: &mut W,
+    len: usize,
+) -> Result<(), FramerError<W::Error>>
+where
+    W: Write,
+    TRng: Rng,
+    TWebSocketType: WebSocketType,
+{
+    core.queue_unsent(len);
+    send_unsent(core, stream).await
+}
 
-    async fn send_unsent<S: Write>(&mut self, stream: &mut S) -> Result<(), FramerError<S::Error>> {
-        if self.core.unsent().is_empty() {
-            return Ok(());
-        }
-        while !self.core.unsent().is_empty() {
-            match stream
-                .write(self.core.unsent())
-                .await
-                .map_err(FramerError::Io)?
-            {
-                0 => panic!("write() returned Ok(0)"),
-                written => self.core.mark_sent(written),
-            }
-        }
-        stream.flush().await.map_err(FramerError::Io)
+async fn send_unsent<W, TRng, TWebSocketType>(
+    core: &mut FramerCore<'_, TRng, TWebSocketType>,
+    stream: &mut W,
+) -> Result<(), FramerError<W::Error>>
+where
+    W: Write,
+    TRng: Rng,
+    TWebSocketType: WebSocketType,
+{
+    if core.unsent().is_empty() {
+        return Ok(());
     }
+    while !core.unsent().is_empty() {
+        match stream.write(core.unsent()).await.map_err(FramerError::Io)? {
+            0 => panic!("write() returned Ok(0)"),
+            written => core.mark_sent(written),
+        }
+    }
+    stream.flush().await.map_err(FramerError::Io)
 }
 
 #[cfg(test)]
