@@ -45,3 +45,11 @@ required-features = ["asynch"]
 [[example]]
 name = "server_async"
 required-features = ["asynch"]
+
+[[example]]
+name = "autobahn_server"
+path = "autobahn/server.rs"
+
+[[example]]
+name = "autobahn_client"
+path = "autobahn/client.rs"
