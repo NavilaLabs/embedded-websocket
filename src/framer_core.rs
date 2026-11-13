@@ -6,8 +6,8 @@ use crate::{
     head,
     request::{Decision, Request},
     WebSocket, WebSocketCloseStatusCode, WebSocketKey, WebSocketOptions,
-    WebSocketReceiveMessageType, WebSocketSendMessageType, WebSocketState, WebSocketSubProtocol,
-    WebSocketType, MASK_KEY_LEN, MAX_CONTROL_FRAME_PAYLOAD_LEN,
+    WebSocketReceiveMessageType, WebSocketSendMessageType, WebSocketState, WebSocketType,
+    MASK_KEY_LEN, MAX_CONTROL_FRAME_PAYLOAD_LEN,
 };
 
 /// A whole websocket message read from the stream.
@@ -99,7 +99,9 @@ pub enum FramerError<E> {
 }
 
 pub(crate) enum Answer<'a> {
+    // the lengths of the response in the write buffer
     Accept(usize),
+    Reject(usize),
     Respond(&'a [u8]),
 }
 
@@ -212,13 +214,15 @@ pub const MIN_READ_BUF_LEN: usize = 2 + MASK_KEY_LEN + MAX_CONTROL_FRAME_PAYLOAD
 /// The frame buffer must also fit the largest text or binary message you accept.
 pub const MIN_FRAME_BUF_LEN: usize = MAX_CONTROL_FRAME_PAYLOAD_LEN;
 
-/// The smallest write buffer a framer can work with: it fits the largest control frame and the
-/// largest response of a server to the opening handshake, which names a sub protocol of
-/// [`WebSocketSubProtocol`]'s full capacity.
+/// The smallest write buffer a framer can work with: it fits the largest control frame, which is
+/// masked and carries 125 bytes of payload, and the response of a server to the opening handshake
+/// without a sub protocol (129 bytes).
 ///
-/// A client's write buffer must also fit its own request of the opening handshake, which grows with
-/// the path, host, origin, sub protocols and additional headers of its [`WebSocketOptions`].
-pub const MIN_WRITE_BUF_LEN: usize = 179;
+/// A server that chooses a sub protocol needs 26 bytes plus the length of the sub protocol more
+/// for its response. A client's write buffer must also fit its own request of the opening
+/// handshake, which grows with the path, host, origin, sub protocols and additional headers of
+/// its [`WebSocketOptions`].
+pub const MIN_WRITE_BUF_LEN: usize = 2 + MASK_KEY_LEN + MAX_CONTROL_FRAME_PAYLOAD_LEN;
 
 /// Progress of a connection that outlives a single framer call.
 ///
@@ -331,12 +335,12 @@ where
             .map_err(FramerError::WebSocket)
     }
 
-    pub(crate) fn decode_connect_response<E>(
+    pub(crate) fn decode_connect_response<'o, E>(
         &mut self,
         web_socket_key: &WebSocketKey,
-        sub_protocols: Option<&[&str]>,
+        sub_protocols: Option<&[&'o str]>,
         searched: &mut usize,
-    ) -> Result<Option<Option<WebSocketSubProtocol>>, FramerError<E>> {
+    ) -> Result<Option<Option<&'o str>>, FramerError<E>> {
         let Some(head_len) = self.head_len(searched) else {
             return Ok(None);
         };
@@ -363,22 +367,18 @@ where
             Decision::Respond(response) => return Ok(Answer::Respond(response)),
             Decision::Accept { sub_protocol } => sub_protocol,
         };
-        let key = match request.upgrade_key() {
-            Ok(key) => key,
-            Err(response) => return Ok(Answer::Respond(response)),
-        };
-        let sub_protocol = sub_protocol
-            .map(|protocol| request.sub_protocol(protocol))
-            .transpose()
-            .map_err(FramerError::WebSocket)?;
-
-        let len = self
+        match self
             .websocket
-            .server_accept(&key, sub_protocol.as_ref(), self.write_buf)
-            .map_err(FramerError::WebSocket)?;
-        // bytes after the request header are the first frames of the client
-        self.consume(head_len);
-        Ok(Answer::Accept(len))
+            .server_accept(&request, sub_protocol, self.write_buf)
+        {
+            Ok(len) => {
+                // bytes after the request header are the first frames of the client
+                self.consume(head_len);
+                Ok(Answer::Accept(len))
+            }
+            Err(crate::Error::NotAnUpgrade(len)) => Ok(Answer::Reject(len)),
+            Err(error) => Err(FramerError::WebSocket(error)),
+        }
     }
 }
 

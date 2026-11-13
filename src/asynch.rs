@@ -63,7 +63,7 @@ use crate::{
     request::BAD_REQUEST,
     Decision, FramerError, FramerState, ReadChunk, ReadResult, Request, WebSocket,
     WebSocketCloseStatusCode, WebSocketOptions, WebSocketSendMessageType, WebSocketState,
-    WebSocketSubProtocol, WebSocketType,
+    WebSocketType,
 };
 
 /// Reads and writes whole websocket messages over a async stream.
@@ -136,11 +136,11 @@ where
     /// * [`FramerError::WebSocket`] if the server rejects the opening handshake.
     ///
     /// [`Error::HttpHeaderIncomplete`]: crate::Error::HttpHeaderIncomplete
-    pub async fn connect<S>(
+    pub async fn connect<'o, S>(
         &mut self,
         stream: &mut S,
-        websocket_options: &WebSocketOptions<'_>,
-    ) -> Result<Option<WebSocketSubProtocol>, FramerError<S::Error>>
+        websocket_options: &WebSocketOptions<'o>,
+    ) -> Result<Option<&'o str>, FramerError<S::Error>>
     where
         S: Read + Write,
     {
@@ -238,6 +238,10 @@ where
             answer => answer?,
         };
         match answer {
+            Answer::Reject(len) => {
+                send(&mut self.core, stream, len).await?;
+                Ok(false)
+            }
             Answer::Accept(len) => {
                 send(&mut self.core, stream, len).await?;
                 Ok(true)

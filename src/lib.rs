@@ -68,7 +68,6 @@ use sha1::{Digest, Sha1};
 
 mod http;
 mod random;
-pub use self::http::{read_http_header, WebSocketContext};
 pub use self::random::EmptyRng;
 
 #[cfg(feature = "asynch")]
@@ -114,9 +113,6 @@ pub type Result<T> = result::Result<T, Error>;
 
 /// A fixed length 24-character string used to hold a websocket key for the opening handshake
 pub type WebSocketKey = String<24>;
-
-/// A maximum sized 24-character string used to store a sub protocol (e.g. `chat`)
-pub type WebSocketSubProtocol = String<24>;
 
 /// Websocket send message type used when sending a websocket frame
 #[derive(PartialEq, Eq, Debug, Copy, Clone)]
@@ -318,6 +314,10 @@ pub enum Error {
     UnexpectedDataFrame,
     /// A message is written while the message of a failed write is not finished yet
     UnfinishedWrite,
+    /// The request is not a websocket upgrade. The first bytes of the output, as many as this
+    /// holds, are the `400 Bad Request` or `426 Upgrade Required` response to send before closing
+    /// the connection
+    NotAnUpgrade(usize),
     /// A whole message is read while a message read in chunks is not finished yet
     UnfinishedRead,
     /// A server receives a frame that the client did not mask (RFC 6455 section 5.1)
@@ -514,21 +514,24 @@ impl<T> WebSocket<T, Server>
 where
     T: Rng,
 {
-    /// Used by the server to accept an incoming client connection and build a websocket upgrade
-    /// http response string. The client http header should be read with the `read_http_header`
-    /// function and the result should be passed to this function.
-    /// Websocket state will change from None -> Open if successful, otherwise None -> Aborted
+    /// Answers the HTTP `request` that opens a connection and opens the websocket.
+    ///
+    /// Read the request with [`Request::read`]. Writes the `101 Switching Protocols` response
+    /// into `to` and returns its length. `sub_protocol` must be one the client offered; the
+    /// response is 129 bytes without it and 26 bytes plus its length more with it.
     ///
     /// # Examples
     ///
     /// ```
     /// use embedded_io_websocket as ws;
-    /// let mut buffer: [u8; 1000] = [0; 1000];
+    /// let request = b"GET /chat HTTP/1.1\r\nHost: localhost\r\nUpgrade: websocket\r\n\
+    ///     Connection: Upgrade\r\nSec-WebSocket-Key: Z7OY1UwHOx/nkSz38kfPwg==\r\n\
+    ///     Sec-WebSocket-Protocol: chat\r\nSec-WebSocket-Version: 13\r\n\r\n";
+    /// let (request, _) = ws::Request::read(request).unwrap();
+    /// let mut buffer = [0; 1000];
     /// let mut ws_server = ws::WebSocketServer::new_server();
-    /// let ws_key = ws::WebSocketKey::try_from("Z7OY1UwHOx/nkSz38kfPwg==").unwrap();
-    /// let sub_protocol = ws::WebSocketSubProtocol::try_from("chat").unwrap();
     /// let len = ws_server
-    ///     .server_accept(&ws_key, Some(&sub_protocol), &mut buffer)
+    ///     .server_accept(&request, Some("chat"), &mut buffer)
     ///     .unwrap();
     /// let response = std::str::from_utf8(&buffer[..len]).unwrap();
     ///
@@ -536,26 +539,35 @@ where
     /// ```
     ///
     /// # Errors
-    /// There should be no way for a user provided input to return the errors listed below as the
-    /// input is already constrained.
-    /// * The http response is built with a stack allocated 1KB buffer and it *should be impossible*
-    ///   for it to return an  `Unknown` error if that buffer is too small. However, this is better
-    ///   than a panic and it will do so if the response header is too large to fit in the buffer
-    /// * This function can return an `Utf8Error` if there was an error with the generation of the
-    ///   accept string. This should also be impossible but an error is preferable to a panic
-    /// * Returns `WebsocketAlreadyOpen` if called on a websocket that is already open
+    ///
+    /// * [`Error::NotAnUpgrade`] if the request is not a valid websocket upgrade (RFC 6455
+    ///   section 4.2.1). `to` then holds the response that rejects it.
+    /// * [`Error::SubProtocolNotOffered`] if the client did not offer `sub_protocol`.
+    /// * [`Error::WriteToBufferTooSmall`] if the response does not fit into `to`.
+    /// * [`Error::WebsocketAlreadyOpen`] if the websocket is already open.
     pub fn server_accept(
         &mut self,
-        sec_websocket_key: &WebSocketKey,
-        sec_websocket_protocol: Option<&WebSocketSubProtocol>,
+        request: &Request<'_>,
+        sub_protocol: Option<&str>,
         to: &mut [u8],
     ) -> Result<usize> {
         if self.state == WebSocketState::Open {
             return Err(Error::WebsocketAlreadyOpen);
         }
+        let sec_websocket_key = match request.upgrade_key() {
+            Ok(key) => key,
+            Err(response) => {
+                to.get_mut(..response.len())
+                    .ok_or(Error::WriteToBufferTooSmall)?
+                    .copy_from_slice(response);
+                return Err(Error::NotAnUpgrade(response.len()));
+            }
+        };
+        if sub_protocol.is_some_and(|protocol| !request.offers(protocol)) {
+            return Err(Error::SubProtocolNotOffered);
+        }
 
-        match http::build_connect_handshake_response(sec_websocket_key, sec_websocket_protocol, to)
-        {
+        match http::build_connect_handshake_response(&sec_websocket_key, sub_protocol, to) {
             Ok(http_response_len) => {
                 self.state = WebSocketState::Open;
                 Ok(http_response_len)
@@ -599,11 +611,7 @@ where
     /// ```
     ///
     /// # Errors
-    /// * The http response is built with a stack allocated 1KB buffer and will return an `Unknown` error
-    ///   if that buffer is too small. This would happen is the user supplied too many
-    ///   additional headers or the sub-protocol string is too large
-    /// * This function can return an `Utf8Error` if there was an error with the generation of the
-    ///   accept string. This should be impossible but an error is preferable to a panic
+    /// * Returns `WriteToBufferTooSmall` if the request does not fit into `to`
     /// * Returns `WebsocketAlreadyOpen` if called on a websocket that is already open
     pub fn client_connect(
         &mut self,
@@ -625,7 +633,8 @@ where
 
     /// Used by a websocket client for checking the server response to an opening handshake
     /// (sent using the client_connect function). Pass the sub protocols the client requested in
-    /// `sub_protocols`. The server chooses one of them (or none) and you get that in the result
+    /// `sub_protocols`. The server chooses one of them (or none) and you get that entry of
+    /// `sub_protocols` in the result
     /// # Examples
     /// ```
     /// use embedded_io_websocket as ws;
@@ -646,12 +655,12 @@ where
     ///   `sub_protocols`
     /// * Returns `HttpHeader(Version)` or some other varient if the HTTP response is not well formed
     /// * Returns `WebsocketAlreadyOpen` if called on a websocket that is already open
-    pub fn client_accept(
+    pub fn client_accept<'o>(
         &mut self,
         sec_websocket_key: &WebSocketKey,
-        sub_protocols: Option<&[&str]>,
+        sub_protocols: Option<&[&'o str]>,
         from: &[u8],
-    ) -> Result<(usize, Option<WebSocketSubProtocol>)> {
+    ) -> Result<(usize, Option<&'o str>)> {
         if self.state == WebSocketState::Open {
             return Err(Error::WebsocketAlreadyOpen);
         }
@@ -1559,26 +1568,14 @@ mod tests {
          \r\n\
          ";
 
-        let (len, web_socket_context) = read_http_header(client_request.as_bytes()).unwrap();
+        let (request, len) = Request::read(client_request.as_bytes()).unwrap();
         assert_eq!(len, client_request.len());
-        let web_socket_context = web_socket_context.unwrap();
-        assert_eq!(
-            "Z7OY1UwHOx/nkSz38kfPwg==",
-            web_socket_context.sec_websocket_key
-        );
-        assert_eq!(
-            "chat",
-            web_socket_context
-                .sec_websocket_protocol_list
-                .first()
-                .unwrap()
-                .as_str()
-        );
+        assert!(request.offers("chat"));
         let mut web_socket = WebSocketServer::new_server();
 
         let mut ws_buffer: [u8; 3000] = [0; 3000];
         let size = web_socket
-            .server_accept(&web_socket_context.sec_websocket_key, None, &mut ws_buffer)
+            .server_accept(&request, None, &mut ws_buffer)
             .unwrap();
         let response = std::str::from_utf8(&ws_buffer[..size]).unwrap();
         let client_response_expected = "HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Accept: ptPnPeDOTo6khJlzmLhOZSh2tAY=\r\n\r\n";
@@ -1599,19 +1596,6 @@ mod tests {
             .unwrap();
         let expected = [129, 5, 104, 101, 108, 108, 111];
         assert_eq!(&expected, &buffer[..len]);
-    }
-
-    #[test]
-    fn server_accept_should_write_sub_protocol() {
-        let mut buffer: [u8; 1000] = [0; 1000];
-        let mut ws_server = WebSocketServer::new_server();
-        let ws_key = WebSocketKey::try_from("Z7OY1UwHOx/nkSz38kfPwg==").unwrap();
-        let sub_protocol = WebSocketSubProtocol::try_from("chat").unwrap();
-        let size = ws_server
-            .server_accept(&ws_key, Some(&sub_protocol), &mut buffer)
-            .unwrap();
-        let response = std::str::from_utf8(&buffer[..size]).unwrap();
-        assert_eq!("HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Protocol: chat\r\nSec-WebSocket-Accept: ptPnPeDOTo6khJlzmLhOZSh2tAY=\r\n\r\n", response);
     }
 
     #[test]

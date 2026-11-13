@@ -14,7 +14,7 @@ use crate::{
     request::BAD_REQUEST,
     Decision, FramerError, FramerState, ReadChunk, ReadResult, Request, WebSocket,
     WebSocketCloseStatusCode, WebSocketOptions, WebSocketSendMessageType, WebSocketState,
-    WebSocketSubProtocol, WebSocketType,
+    WebSocketType,
 };
 
 /// Reads and writes whole websocket messages over a blocking stream.
@@ -85,11 +85,11 @@ where
     /// * [`FramerError::WebSocket`] if the server rejects the opening handshake.
     ///
     /// [`Error::HttpHeaderIncomplete`]: crate::Error::HttpHeaderIncomplete
-    pub fn connect<S>(
+    pub fn connect<'o, S>(
         &mut self,
         stream: &mut S,
-        websocket_options: &WebSocketOptions<'_>,
-    ) -> Result<Option<WebSocketSubProtocol>, FramerError<S::Error>>
+        websocket_options: &WebSocketOptions<'o>,
+    ) -> Result<Option<&'o str>, FramerError<S::Error>>
     where
         S: Read + Write,
     {
@@ -182,6 +182,10 @@ where
             answer => answer?,
         };
         match answer {
+            Answer::Reject(len) => {
+                self.send(stream, len)?;
+                Ok(false)
+            }
             Answer::Accept(len) => {
                 self.send(stream, len)?;
                 Ok(true)
@@ -586,13 +590,15 @@ mod tests {
     fn frames_received_with_handshake_response() {
         use rand::{rngs::StdRng, SeedableRng};
 
-        let mut scratch = vec![0; 1024];
-        let (_, web_socket_key) = WebSocketClient::new_client(StdRng::seed_from_u64(1))
-            .client_connect(&websocket_options(), &mut scratch)
+        let mut request = vec![0; 1024];
+        let (len, _) = WebSocketClient::new_client(StdRng::seed_from_u64(1))
+            .client_connect(&websocket_options(), &mut request)
             .unwrap();
+        let (request, _) = Request::read(&request[..len]).unwrap();
+        let mut scratch = vec![0; 1024];
         let mut ws_server = WebSocketServer::new_server();
         let len = ws_server
-            .server_accept(&web_socket_key, None, &mut scratch)
+            .server_accept(&request, None, &mut scratch)
             .unwrap();
         let mut received = scratch[..len].to_vec();
         received.extend(fragmented_frames());

@@ -3,8 +3,8 @@ use core::str;
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 
 use crate::{
-    head::{is_token_byte, Head},
-    Error, Result, WebSocketKey, WebSocketSubProtocol,
+    head::{self, is_token_byte, Head},
+    Error, Result, WebSocketKey,
 };
 
 pub(crate) const BAD_REQUEST: &[u8] =
@@ -20,6 +20,21 @@ pub struct Request<'a> {
 }
 
 impl<'a> Request<'a> {
+    /// Reads the request head at the start of `from`, which holds the bytes received so far.
+    ///
+    /// Returns the request and the length of its head, after which the first websocket frames
+    /// start.
+    ///
+    /// # Errors
+    ///
+    /// * [`Error::HttpHeaderIncomplete`] if `from` does not hold the whole head yet.
+    /// * [`Error::HttpHeaderInvalid`] if the head is not a valid HTTP/1.1 request. Answer it
+    ///   with `400 Bad Request` and close the connection.
+    pub fn read(from: &'a [u8]) -> Result<(Self, usize)> {
+        let len = head::head_len(from, &mut 0).ok_or(Error::HttpHeaderIncomplete)?;
+        Ok((Self::parse(&from[..len])?, len))
+    }
+
     /// Parses a complete request head that ends with the empty line.
     pub(crate) fn parse(head: &'a [u8]) -> Result<Self> {
         let head = Head::parse(head)?;
@@ -71,13 +86,6 @@ impl<'a> Request<'a> {
             .filter(|key| is_sixteen_base64_encoded_bytes(key))
             .and_then(|key| WebSocketKey::try_from(key).ok())
             .ok_or(BAD_REQUEST)
-    }
-
-    pub(crate) fn sub_protocol(&self, protocol: &str) -> Result<WebSocketSubProtocol> {
-        if !self.offers(protocol) {
-            return Err(Error::SubProtocolNotOffered);
-        }
-        WebSocketSubProtocol::try_from(protocol).map_err(|_| Error::SubProtocolNotOffered)
     }
 }
 

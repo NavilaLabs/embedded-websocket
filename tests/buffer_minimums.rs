@@ -150,15 +150,17 @@ fn minimum_buffers_answer_the_largest_ping_as_a_client() {
     assert_eq!(stream.written.len(), MIN_READ_BUF_LEN);
 }
 
-/// A server accepts a request that offers a sub protocol of the largest length and chooses it.
-fn accept_largest_sub_protocol(
+/// A server accepts a request and chooses `sub_protocol`, which the client offered.
+fn accept(
+    sub_protocol: Option<&str>,
     write_buf_len: usize,
 ) -> Result<Vec<u8>, FramerError<core::convert::Infallible>> {
-    let sub_protocol = "s".repeat(24);
+    let offered = sub_protocol
+        .map(|protocol| format!("Sec-WebSocket-Protocol: {protocol}\r\n"))
+        .unwrap_or_default();
     let request = format!(
         "GET / HTTP/1.1\r\nHost: localhost\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\
-         Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Protocol: {sub_protocol}\r\n\
-         Sec-WebSocket-Version: 13\r\n\r\n"
+         Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n{offered}Sec-WebSocket-Version: 13\r\n\r\n"
     );
     let mut stream = MemoryStream::new(request.into_bytes());
     let mut read_buf = vec![0; 1024];
@@ -166,28 +168,58 @@ fn accept_largest_sub_protocol(
     let mut state = FramerState::new();
     let mut ws_server = WebSocketServer::new_server();
     let mut framer = Framer::new(&mut read_buf, &mut state, &mut write_buf, &mut ws_server);
-    let is_open = framer.accept(&mut stream, |_| Decision::Accept {
-        sub_protocol: Some(&sub_protocol),
-    })?;
+    let is_open = framer.accept(&mut stream, |_| Decision::Accept { sub_protocol })?;
     assert!(is_open);
     Ok(stream.written)
 }
 
 #[test]
-fn the_largest_handshake_response_has_the_minimum_write_buffer_length() {
-    let response = accept_largest_sub_protocol(MIN_WRITE_BUF_LEN).unwrap();
-    assert_eq!(response.len(), MIN_WRITE_BUF_LEN);
+fn the_largest_control_frame_has_the_minimum_write_buffer_length() {
+    let pong = client_frame(WebSocketSendMessageType::Pong, &MAX_CONTROL_PAYLOAD);
+    assert_eq!(pong.len(), MIN_WRITE_BUF_LEN);
+}
+
+#[test]
+fn a_client_write_buffer_one_byte_short_fails_on_the_largest_pong() {
+    let mut ws_client = WebSocketClient::new_client(rand::rng());
+    ws_client.state = WebSocketState::Open;
+    let mut write_buf = vec![0; MIN_WRITE_BUF_LEN - 1];
+    assert_eq!(
+        ws_client
+            .write(
+                WebSocketSendMessageType::Pong,
+                true,
+                &MAX_CONTROL_PAYLOAD,
+                &mut write_buf
+            )
+            .err(),
+        Some(embedded_io_websocket::Error::WriteToBufferTooSmall)
+    );
+}
+
+#[test]
+fn the_handshake_response_without_sub_protocol_fits_the_minimum_write_buffer() {
+    let response = accept(None, MIN_WRITE_BUF_LEN).unwrap();
     assert!(response.starts_with(b"HTTP/1.1 101 Switching Protocols\r\n"));
 }
 
 #[test]
-fn a_write_buffer_one_byte_short_fails_on_the_largest_handshake_response() {
-    assert!(matches!(
-        accept_largest_sub_protocol(MIN_WRITE_BUF_LEN - 1),
-        Err(FramerError::WebSocket(
-            embedded_io_websocket::Error::WriteToBufferTooSmall
-        ))
-    ));
+fn a_sub_protocol_adds_26_bytes_and_its_length_to_the_handshake_response() {
+    let without = accept(None, 1024).unwrap().len();
+    for len in [1, 24, 200] {
+        let sub_protocol = "s".repeat(len);
+        let needed = without + 26 + len;
+        let response = accept(Some(&sub_protocol), needed.max(MIN_WRITE_BUF_LEN)).unwrap();
+        assert_eq!(response.len(), needed);
+        if needed > MIN_WRITE_BUF_LEN {
+            assert!(matches!(
+                accept(Some(&sub_protocol), needed - 1),
+                Err(FramerError::WebSocket(
+                    embedded_io_websocket::Error::WriteToBufferTooSmall
+                ))
+            ));
+        }
+    }
 }
 
 // The framer answers the largest ping with a pong of the same length.

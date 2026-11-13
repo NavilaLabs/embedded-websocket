@@ -13,7 +13,9 @@ fuzz_target!(|response: &[u8]| {
         assert!(len <= response.len());
         assert!(response[..len].ends_with(b"\r\n\r\n"));
         if let Some(protocol) = protocol {
-            assert!(OFFERED.contains(&protocol.as_str()));
+            assert!(OFFERED
+                .iter()
+                .any(|offered| core::ptr::eq(*offered, protocol)));
         }
     }
 });
