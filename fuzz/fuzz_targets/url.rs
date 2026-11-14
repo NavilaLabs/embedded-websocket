@@ -24,7 +24,7 @@ fuzz_target!(|input: &str| {
         Err(error) => panic!("the url crate rejects it: {error}"),
     };
 
-    assert_eq!(ours.is_secure(), theirs.scheme() == "wss");
+    assert_eq!(ours.is_secure(), matches!(theirs.scheme(), "wss" | "https"));
     assert_eq!(Some(ours.port()), theirs.port_or_known_default());
     match theirs.host().expect("a host") {
         url::Host::Domain(domain) => assert_eq!(domain, ours.host().to_ascii_lowercase()),

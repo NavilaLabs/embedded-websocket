@@ -2,7 +2,8 @@ use core::net::{Ipv4Addr, Ipv6Addr};
 
 use crate::{Error, Result, WebSocketOptions};
 
-/// A `ws://` or `wss://` URL split into the parts a client needs (RFC 6455 section 3).
+/// A `ws://` or `wss://` URL split into the parts a client needs (RFC 6455 section 3). As in
+/// browsers, `http://` and `https://` are read as `ws://` and `wss://`.
 ///
 /// All parts borrow from the parsed string.
 ///
@@ -32,7 +33,7 @@ pub struct WebSocketUrl<'a> {
 impl<'a> WebSocketUrl<'a> {
     /// Parses `url`, for example `ws://192.168.1.10:8080/chat` or `wss://[::1]/`.
     ///
-    /// The scheme is `ws` or `wss` in any case. The host is a name of letters, digits, `-`, `.`,
+    /// The scheme is `ws`, `wss`, `http` or `https` in any case. The host is a name of letters, digits, `-`, `.`,
     /// `_` and `~`, an IPv4 address or an IPv6 address in brackets. Without a port, the default
     /// port of the scheme is used. The path and query may contain the characters RFC 3986 allows
     /// there, including percent encoded ones, which are kept as they are.
@@ -44,9 +45,16 @@ impl<'a> WebSocketUrl<'a> {
     /// empty port or port 0.
     pub fn parse(url: &'a str) -> Result<Self> {
         let (scheme, rest) = url.split_once("://").ok_or(Error::InvalidUrl)?;
-        let (is_secure, default_port) = if scheme.eq_ignore_ascii_case("ws") {
+        // the WHATWG WebSockets standard, which browsers follow, reads http as ws and https as wss
+        let (is_secure, default_port) = if ["ws", "http"]
+            .iter()
+            .any(|plain| scheme.eq_ignore_ascii_case(plain))
+        {
             (false, 80)
-        } else if scheme.eq_ignore_ascii_case("wss") {
+        } else if ["wss", "https"]
+            .iter()
+            .any(|secure| scheme.eq_ignore_ascii_case(secure))
+        {
             (true, 443)
         } else {
             return Err(Error::InvalidUrl);
@@ -66,7 +74,7 @@ impl<'a> WebSocketUrl<'a> {
         })
     }
 
-    /// Returns `true` for `wss://`: the connection must be wrapped in TLS before the opening
+    /// Returns `true` for `wss://` and `https://`: the connection must be wrapped in TLS before the opening
     /// handshake.
     pub fn is_secure(&self) -> bool {
         self.is_secure

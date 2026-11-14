@@ -1,4 +1,4 @@
-//! Opening handshakes configured from a `ws://` or `wss://` URL.
+//! Opening handshakes configured from a `ws://`, `wss://`, `http://` or `https://` URL.
 
 use embedded_io_websocket::{Error, WebSocketClient, WebSocketUrl};
 
@@ -62,6 +62,23 @@ fn url_parts_are_split_and_default_ports_filled_in() {
             "/",
             "example.com:443",
         ),
+        // the WHATWG WebSockets standard reads http as ws and https as wss
+        (
+            "http://example.com/chat",
+            false,
+            "example.com",
+            80,
+            "/chat",
+            "example.com",
+        ),
+        (
+            "HTTPS://example.com:8443",
+            true,
+            "example.com",
+            8443,
+            "/",
+            "example.com:8443",
+        ),
     ] {
         let parsed = WebSocketUrl::parse(url).unwrap_or_else(|error| panic!("{url}: {error:?}"));
         assert_eq!(parsed.is_secure(), is_secure, "{url}");
@@ -90,7 +107,8 @@ fn urls_a_websocket_cannot_use_are_rejected() {
     for url in [
         "",
         "example.com",
-        "http://example.com/",
+        "ftp://example.com/",
+        "https://example.com/#fragment",
         "ws:/example.com",
         "ws://",
         "ws:///path",

@@ -328,7 +328,8 @@ pub enum Error {
     UnexpectedDataFrame,
     /// A message is written while the message of a failed write is not finished yet
     UnfinishedWrite,
-    /// A URL is not a valid `ws://` or `wss://` URL, see [`WebSocketUrl::parse`]
+    /// A URL is not a valid `ws://`, `wss://`, `http://` or `https://` URL, see
+    /// [`WebSocketUrl::parse`]
     InvalidUrl,
     /// The request is not a websocket upgrade. The first bytes of the output, as many as this
     /// holds, are the `400 Bad Request` or `426 Upgrade Required` response to send before closing
