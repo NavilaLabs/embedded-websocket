@@ -247,6 +247,21 @@ mod tests {
         );
     }
 
+    // RFC 9112 section 4: reason-phrase = 1*( HTAB / SP / VCHAR / obs-text )
+    #[test]
+    fn reason_phrase_may_hold_tabs_and_obs_text() {
+        let response =
+            b"HTTP/1.1 101 Schalte\tum \xe4\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\
+            Sec-WebSocket-Accept: ptPnPeDOTo6khJlzmLhOZSh2tAY=\r\n\r\n";
+        assert!(read_server_connect_handshake_response(&key(), None, response).is_ok());
+        let response = b"HTTP/1.1 101 a\x01b\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\
+            Sec-WebSocket-Accept: ptPnPeDOTo6khJlzmLhOZSh2tAY=\r\n\r\n";
+        assert_eq!(
+            read_server_connect_handshake_response(&key(), None, response),
+            Err(Error::HttpHeaderInvalid)
+        );
+    }
+
     // RFC 6455 section 11.3.3 and 11.3.4: neither field may appear more than once
     #[test]
     fn response_with_a_repeated_accept_or_protocol_is_rejected() {

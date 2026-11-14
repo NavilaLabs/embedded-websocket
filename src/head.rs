@@ -20,7 +20,7 @@ pub(crate) fn head_len(buf: &[u8], searched: &mut usize) -> Option<usize> {
 
 /// A complete and validated HTTP/1.1 message head (RFC 9112 section 2.1).
 pub(crate) struct Head<'a> {
-    start_line: &'a str,
+    start_line: &'a [u8],
     fields: &'a [u8],
 }
 
@@ -32,16 +32,12 @@ impl<'a> Head<'a> {
             Some(end) => (&head[..end], &head[end + 2..]),
             None => (head, &[][..]),
         };
-        if !start_line
-            .iter()
-            .all(|&byte| byte == b' ' || byte.is_ascii_graphic())
-        {
+        // the bytes a reason phrase may hold (RFC 9112 section 4); the parts of a request line
+        // are checked by the request
+        if !is_valid_field_value(start_line) {
             return Err(Error::HttpHeaderInvalid);
         }
-        let head = Self {
-            start_line: str::from_utf8(start_line).map_err(|_| Error::HttpHeaderInvalid)?,
-            fields,
-        };
+        let head = Self { start_line, fields };
         // A field line cannot contain CR or LF, so a bare CR or LF fails here instead of being
         // read as a line break that other HTTP parsers would not see.
         if !lines(fields).all(is_valid_field) {
@@ -50,11 +46,17 @@ impl<'a> Head<'a> {
         Ok(head)
     }
 
-    /// The request line or status line split at its first two spaces.
-    pub(crate) fn start_line(&self) -> Option<(&'a str, &'a str, &'a str)> {
-        let (first, rest) = self.start_line.split_once(' ')?;
-        let (second, third) = rest.split_once(' ').unwrap_or((rest, ""));
-        Some((first, second, third))
+    /// The request line or status line split at its first two spaces. The first two parts must
+    /// be ASCII; the third is a reason phrase or an HTTP version.
+    pub(crate) fn start_line(&self) -> Option<(&'a str, &'a str, &'a [u8])> {
+        let mut parts = self.start_line.splitn(3, |&byte| byte == b' ');
+        let first = str::from_utf8(parts.next()?)
+            .ok()
+            .filter(|part| part.is_ascii())?;
+        let second = str::from_utf8(parts.next()?)
+            .ok()
+            .filter(|part| part.is_ascii())?;
+        Some((first, second, parts.next().unwrap_or_default()))
     }
 
     /// Name and value of every header field, with the whitespace around the value removed.
@@ -162,7 +164,7 @@ mod tests {
     #[test]
     fn fields_are_trimmed_and_found_case_insensitively() {
         let head = Head::parse(b"GET /chat HTTP/1.1\r\nHost:  a \r\nConnection: keep-alive,Upgrade\r\nconnection: x\r\n\r\n").unwrap();
-        assert_eq!(head.start_line(), Some(("GET", "/chat", "HTTP/1.1")));
+        assert_eq!(head.start_line(), Some(("GET", "/chat", &b"HTTP/1.1"[..])));
         assert_eq!(head.field("HOST"), Some(&b"a"[..]));
         assert!(head.has_token("Connection", "upgrade"));
         assert!(head.has_token("connection", "x"));

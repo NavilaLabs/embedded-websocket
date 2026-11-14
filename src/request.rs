@@ -44,7 +44,8 @@ impl<'a> Request<'a> {
         if method.is_empty()
             || !method.bytes().all(is_token_byte)
             || path.is_empty()
-            || version != "HTTP/1.1"
+            || !path.bytes().all(|byte| byte.is_ascii_graphic())
+            || version != b"HTTP/1.1"
             || !has_one_valid_host(&head)
         {
             return Err(Error::HttpHeaderInvalid);
@@ -190,6 +191,23 @@ mod tests {
         assert!(request.offers("chat") && request.offers("v2.json"));
         for protocol in ["a b", "x\"y", "v2;q", ""] {
             assert!(!request.offers(protocol), "{protocol}");
+        }
+    }
+
+    // RFC 9112 section 3.2: the request target has no whitespace, controls or obs-text
+    #[test]
+    fn request_target_with_tabs_or_obs_text_is_rejected() {
+        for line in [
+            &b"GET /a\tb HTTP/1.1"[..],
+            b"GET /\xe4 HTTP/1.1",
+            b"GET\t/ HTTP/1.1",
+        ] {
+            let head = [line, b"\r\nHost: a\r\n\r\n"].concat();
+            assert_eq!(
+                Request::parse(&head).err(),
+                Some(Error::HttpHeaderInvalid),
+                "{line:?}"
+            );
         }
     }
 
