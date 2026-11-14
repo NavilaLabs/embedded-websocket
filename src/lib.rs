@@ -782,7 +782,9 @@ where
     /// assert_eq!(&expected, &buffer[..len]);
     /// ```
     /// # Errors
-    /// * Returns `WebSocketNotOpen` when the websocket is not open when this function is called
+    /// * Returns `WebSocketNotOpen` when the websocket is not open when this function is called.
+    ///   After [`close`](Self::close) only a Pong may still be sent, to answer a ping that
+    ///   arrives before the close reply
     /// * Returns `WriteToBufferTooSmall` when the `to` buffer is too small to fit the websocket
     ///   frame header (2-14 bytes) plus the payload. Consider fragmenting the messages by making
     ///   multiple write calls with `end_of_message` set to `false` and the final call set to `true`
@@ -795,32 +797,37 @@ where
         from: &[u8],
         to: &mut [u8],
     ) -> Result<usize> {
-        if self.state == WebSocketState::Open || self.state == WebSocketState::CloseReceived {
-            let op_code = message_type.to_op_code();
-            match op_code {
-                WebSocketOpCode::TextFrame | WebSocketOpCode::BinaryFrame => {
-                    let op_code = if self.is_write_continuation {
-                        WebSocketOpCode::ContinuationFrame
-                    } else {
-                        op_code
-                    };
-                    self.is_write_continuation = !end_of_message;
-                    self.write_frame(from, to, op_code, end_of_message)
-                }
-                _ => {
-                    if from.len() > MAX_CONTROL_FRAME_PAYLOAD_LEN {
-                        return Err(Error::InvalidFrameLength);
-                    }
-                    if op_code == WebSocketOpCode::ConnectionClose {
-                        self.state = WebSocketState::Closed
-                    }
-                    // Control frames are never fragmented and may be sent between the frames of a
-                    // fragmented message (RFC 6455 section 5.5).
-                    self.write_frame(from, to, op_code, true)
-                }
+        let op_code = message_type.to_op_code();
+        let may_send = match self.state {
+            WebSocketState::Open | WebSocketState::CloseReceived => true,
+            // RFC 6455 section 5.5.2: a ping must be answered until a close frame is received
+            WebSocketState::CloseSent => op_code == WebSocketOpCode::Pong,
+            _ => false,
+        };
+        if !may_send {
+            return Err(Error::WebSocketNotOpen);
+        }
+        match op_code {
+            WebSocketOpCode::TextFrame | WebSocketOpCode::BinaryFrame => {
+                let op_code = if self.is_write_continuation {
+                    WebSocketOpCode::ContinuationFrame
+                } else {
+                    op_code
+                };
+                self.is_write_continuation = !end_of_message;
+                self.write_frame(from, to, op_code, end_of_message)
             }
-        } else {
-            Err(Error::WebSocketNotOpen)
+            _ => {
+                if from.len() > MAX_CONTROL_FRAME_PAYLOAD_LEN {
+                    return Err(Error::InvalidFrameLength);
+                }
+                if op_code == WebSocketOpCode::ConnectionClose {
+                    self.state = WebSocketState::Closed
+                }
+                // Control frames are never fragmented and may be sent between the frames of a
+                // fragmented message (RFC 6455 section 5.5).
+                self.write_frame(from, to, op_code, true)
+            }
         }
     }
 

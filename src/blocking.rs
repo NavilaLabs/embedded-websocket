@@ -865,6 +865,42 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn ping_before_the_close_reply_is_answered() {
+        let mut read_buf = vec![0; 1024];
+        let mut write_buf = vec![0; 1024];
+        let mut frame_buf = vec![0; 1024];
+        let mut state = FramerState::new();
+        let mut ws_server = open_server();
+        let mut stream = ScriptedStream::new();
+        let mut framer = Framer::new(&mut read_buf, &mut state, &mut write_buf, &mut ws_server);
+        framer
+            .close(&mut stream, WebSocketCloseStatusCode::NormalClosure, None)
+            .unwrap();
+        stream
+            .chunks
+            .push_back(client_frame(b"ping", WebSocketOpCode::Ping, true));
+        stream.chunks.push_back(client_frame(
+            &close_payload(1000, ""),
+            WebSocketOpCode::ConnectionClose,
+            true,
+        ));
+        assert!(matches!(
+            framer.read(&mut stream, &mut frame_buf).unwrap(),
+            ReadResult::Closed {
+                status: WebSocketCloseStatusCode::NormalClosure,
+                reason: ""
+            }
+        ));
+        assert_eq!(
+            frames(&stream.written),
+            [
+                (0x8, true, close_payload(1000, "")),
+                (0xA, true, b"ping".to_vec()),
+            ]
+        );
+    }
+
     fn read_with_failing_write(
         frame: Vec<u8>,
     ) -> (FramerError<Interrupted>, ReadResult<'static>, Vec<u8>) {
