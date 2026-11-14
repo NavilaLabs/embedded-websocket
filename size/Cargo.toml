@@ -1,0 +1,26 @@
+[package]
+name = "size-probes"
+version = "0.0.0"
+edition = "2021"
+publish = false
+description = "Minimal firmwares that measure the flash and RAM the library needs on a Cortex-M4F"
+
+[dependencies]
+embedded-io-websocket = { path = "..", features = ["asynch"] }
+embedded-io = "0.7.1"
+embedded-io-async = "0.7.0"
+cortex-m-rt = "0.7.5"
+
+# The probes are only measured, never run, and a sleeping loop would add code to the baseline.
+[lints.clippy]
+empty_loop = "allow"
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+panic = "abort"
+debug = false
+
+# not part of the workspace of the library
+[workspace]

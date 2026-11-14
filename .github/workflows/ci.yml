@@ -52,13 +52,38 @@ jobs:
         env:
           RUSTDOCFLAGS: -D warnings
 
+  size:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@1.100.0
+        with:
+          components: llvm-tools
+          targets: thumbv7em-none-eabihf
+      - name: Measure this commit
+        run: size/report.py measure > "$RUNNER_TEMP/current.json"
+      - name: Measure master
+        if: github.event_name == 'pull_request'
+        run: |
+          git worktree add "$RUNNER_TEMP/master" "origin/${{ github.base_ref }}"
+          if [ -x "$RUNNER_TEMP/master/size/report.py" ]; then
+            "$RUNNER_TEMP/master/size/report.py" measure > "$RUNNER_TEMP/master.json"
+          fi
+      - name: Report
+        run: |
+          baseline=""
+          if [ -f "$RUNNER_TEMP/master.json" ]; then baseline="$RUNNER_TEMP/master.json"; fi
+          size/report.py markdown "$RUNNER_TEMP/current.json" $baseline >> "$GITHUB_STEP_SUMMARY"
+
   embassy-examples:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.100.0
         with:
-          components: clippy
+          components: clippy, llvm-tools
           targets: thumbv6m-none-eabi, riscv32imc-unknown-none-elf
       - name: Test the shared example code against a local TLS server
         working-directory: examples/embassy-common
@@ -72,6 +97,19 @@ jobs:
         env:
           RUSTFLAGS: -D warnings -C link-arg=-Tlinkall.x -C force-frame-pointers
         run: cargo clippy --release && cargo build --release
+      - name: Report the size of the board examples
+        run: |
+          size="$(rustc --print sysroot)/lib/rustlib/$(rustc --print host-tuple)/bin/llvm-size"
+          {
+            echo "### Board examples, for information"
+            echo
+            echo "Whole firmwares including WiFi, the network stack and TLS."
+            echo
+            echo '```'
+            "$size" examples/embassy-pico-w/target/thumbv6m-none-eabi/release/embassy-pico-w \
+              examples/embassy-esp32c3/target/riscv32imc-unknown-none-elf/release/embassy-esp32c3
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
 
   fuzz:
     if: github.event_name == 'pull_request' || github.ref == 'refs/heads/master'

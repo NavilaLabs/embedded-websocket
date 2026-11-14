@@ -157,6 +157,8 @@ autobahn/run.sh
 
 `autobahn/run.sh` runs the Autobahn testsuite against an echo server and an echo client built on the blocking framer. It needs Docker and jq.
 
+`size/report.py measure > size.json && size/report.py markdown size.json` measures the flash and static RAM the library adds to an empty Cortex-M4F firmware (`thumbv7em-none-eabihf`, `opt-level = "s"`, LTO) for the codec, the blocking framer and the async framer, and the size of the public types on that target. It needs the `llvm-tools` rustup component. CI reports these numbers in the summary of every run, on pull requests with the change against `master`, together with the size of the board examples.
+
 `fuzz/run.sh [seconds]` runs every fuzz target in `fuzz/` for the given time (default 60 seconds) with [cargo-fuzz](https://github.com/rust-fuzz/cargo-fuzz), which needs a nightly toolchain. The targets cover the HTTP head scanner, request and response parsing, the frame decoder and a server framer, and check properties beyond crashes, for example that an accepted key is 16 base64 encoded bytes and that a decoded frame encodes back to the same bytes. A failing input lands in `fuzz/artifacts/`; replay it with `cargo +nightly fuzz run <target> <file>`.
 
 ## License
