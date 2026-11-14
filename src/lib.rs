@@ -417,8 +417,9 @@ pub struct WebSocketReadResult {
 /// Websocket options used by a websocket client to initiate an opening handshake with a
 /// websocket server
 ///
-/// Each part is sent as it is, so it must not contain line breaks: the path no whitespace or
-/// control characters (RFC 9112 section 3.2), the host and origin no control characters other
+/// Each part is sent as it is, so it must not contain line breaks: the path only the characters
+/// RFC 3986 allows in a path and query, with valid percent encoding and without a fragment
+/// (RFC 9112 section 3.2.1, RFC 6455 section 3), the host and origin no control characters other
 /// than tab, and each additional header must be a valid `Name: value` field (RFC 9110
 /// section 5).
 pub struct WebSocketOptions<'a> {

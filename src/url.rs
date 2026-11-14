@@ -158,7 +158,7 @@ fn is_host_byte(byte: u8) -> bool {
 }
 
 // RFC 3986 section 3.3 and 3.4: unreserved, percent encoded, sub-delims, ":", "@", "/" and "?"
-fn is_resource_byte(byte: u8) -> bool {
+pub(crate) fn is_resource_byte(byte: u8) -> bool {
     is_host_byte(byte)
         || matches!(
             byte,

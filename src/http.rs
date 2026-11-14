@@ -1,5 +1,5 @@
 use super::*;
-use crate::head;
+use crate::{head, url};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use heapless::String;
 
@@ -131,13 +131,13 @@ pub(crate) fn build_connect_handshake_request(
 }
 
 // Each option must stay within its part of the request head, so none can end a line and add
-// header fields of its own: the request target of RFC 9112 section 3.2 has no whitespace or
-// control characters, and field values and lines follow RFC 9110 section 5.
+// header fields of its own: the path is an origin-form request target (RFC 9112 section 3.2.1),
+// which also leaves out the fragment that RFC 6455 section 3 forbids, and field values and lines
+// follow RFC 9110 section 5.
 fn can_be_sent(websocket_options: &WebSocketOptions) -> bool {
-    websocket_options
-        .path
-        .bytes()
-        .all(|byte| byte.is_ascii_graphic())
+    let path = websocket_options.path;
+    path.bytes().all(url::is_resource_byte)
+        && url::is_percent_encoding_valid(path)
         && head::is_valid_field_value(websocket_options.host.as_bytes())
         && websocket_options
             .origin
@@ -282,6 +282,35 @@ mod tests {
         let mut to = [0; 1024];
         let (len, _) = build_connect_handshake_request(&options, &mut rand::rng(), &mut to)?;
         Ok(std::string::String::from_utf8(to[..len].to_vec()).unwrap())
+    }
+
+    fn request_with_path(path: &str) -> Result<usize> {
+        let options = WebSocketOptions {
+            path,
+            host: "localhost",
+            origin: None,
+            sub_protocols: None,
+            additional_headers: None,
+        };
+        let mut to = [0; 1024];
+        build_connect_handshake_request(&options, &mut rand::rng(), &mut to).map(|(len, _)| len)
+    }
+
+    // RFC 9112 section 3.2.1 and RFC 6455 section 3, which forbids fragments
+    #[test]
+    fn path_must_be_an_origin_form_target() {
+        for path in ["/", "", "?a=1", "/a/b%20c?x=/:@!$&'()*+,;=-._~"] {
+            assert!(request_with_path(path).is_ok(), "{path}");
+        }
+        for path in [
+            "/a#b", "/a#", "/a{b}", "/a|b", "/a\"b", "/%zz", "/%4", "/a\\b", "/ä",
+        ] {
+            assert_eq!(
+                request_with_path(path),
+                Err(Error::HttpHeaderInvalid),
+                "{path}"
+            );
+        }
     }
 
     #[test]
