@@ -305,6 +305,9 @@ pub enum Error {
     AcceptStringInvalid,
     /// The sub protocol of the opening handshake is not one the client offered
     SubProtocolNotOffered,
+    /// The server answered the opening handshake with an extension, which the client never offers
+    /// (RFC 6455 section 4.1)
+    ExtensionNotOffered,
     /// The sub protocols a client offers are not unique and non-empty HTTP tokens
     /// (RFC 6455 section 4.1)
     InvalidSubProtocol,
@@ -669,6 +672,8 @@ where
     /// * Returns `AcceptStringInvalid` if the web server failed to return a valid accept string
     /// * Returns `SubProtocolNotOffered` if the server chose a sub protocol that is not in
     ///   `sub_protocols`
+    /// * Returns `ExtensionNotOffered` if the server chose an extension, because the client offers
+    ///   none
     /// * Returns `HttpHeader(Version)` or some other varient if the HTTP response is not well formed
     /// * Returns `WebsocketAlreadyOpen` if called on a websocket that is already open
     pub fn client_accept<'o>(

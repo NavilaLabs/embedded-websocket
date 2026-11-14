@@ -50,6 +50,9 @@ pub(crate) fn read_server_connect_handshake_response<'o>(
     if response.field("sec-websocket-accept") != Some(&expected_accept_string[..]) {
         return Err(Error::AcceptStringInvalid);
     }
+    if response.tokens("sec-websocket-extensions").next().is_some() {
+        return Err(Error::ExtensionNotOffered);
+    }
 
     let sub_protocol = match response.field("sec-websocket-protocol") {
         Some(sub_protocol) => {
@@ -228,6 +231,19 @@ mod tests {
         assert_eq!(
             read_server_connect_handshake_response(&key(), None, response),
             Err(Error::AcceptStringInvalid)
+        );
+    }
+
+    // RFC 6455 section 4.1: the client offers no extension, so the server must not use one
+    #[test]
+    fn response_with_an_extension_is_rejected() {
+        let response =
+            b"HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\
+            Sec-WebSocket-Extensions: permessage-deflate\r\n\
+            Sec-WebSocket-Accept: ptPnPeDOTo6khJlzmLhOZSh2tAY=\r\n\r\n";
+        assert_eq!(
+            read_server_connect_handshake_response(&key(), None, response),
+            Err(Error::ExtensionNotOffered)
         );
     }
 
