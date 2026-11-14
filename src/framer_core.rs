@@ -624,7 +624,7 @@ where
                     return self.need_more_data();
                 }
                 Ok(Some(len)) if self.state.frame_cursor + len.payload > frame_buf.len() => {
-                    if self.state.frame_cursor == 0 {
+                    if len.payload > frame_buf.len() {
                         return Err(FramerError::FrameTooLarge(frame_buf.len()));
                     }
                     if mode == ReadMode::WholeMessages {

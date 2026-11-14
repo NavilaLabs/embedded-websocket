@@ -963,6 +963,32 @@ mod tests {
     }
 
     #[test]
+    fn close_larger_than_a_too_small_frame_buffer_fails_without_panicking() {
+        let mut read_buf = vec![0; 1024];
+        let mut write_buf = vec![0; 1024];
+        let mut frame_buf = vec![0; 50];
+        let mut state = FramerState::new();
+        let mut ws_server = open_server();
+        let mut stream = ScriptedStream::new();
+        stream.chunks.push_back(
+            [
+                client_frame(b"abc", WebSocketOpCode::TextFrame, false),
+                client_frame(
+                    &close_payload(1000, &"x".repeat(98)),
+                    WebSocketOpCode::ConnectionClose,
+                    true,
+                ),
+            ]
+            .concat(),
+        );
+        let mut framer = Framer::new(&mut read_buf, &mut state, &mut write_buf, &mut ws_server);
+        assert!(matches!(
+            framer.read(&mut stream, &mut frame_buf),
+            Err(FramerError::FrameTooLarge(50))
+        ));
+    }
+
+    #[test]
     fn close_that_does_not_fit_beside_the_message_is_returned() {
         let mut read_buf = vec![0; 1024];
         let mut write_buf = vec![0; 1024];
