@@ -1,0 +1,23 @@
+[package]
+name = "embassy-common"
+version = "0.0.0"
+edition = "2021"
+publish = false
+description = "Application code shared by the embassy examples: a wss:// client and a ws:// echo server"
+
+[dependencies]
+embedded-io-websocket = { path = "../..", features = ["asynch"] }
+embedded-io-async = "0.7.0"
+embedded-tls = { version = "0.19.0", default-features = false, features = ["rustpki"] }
+rand_core = { version = "0.10.1", default-features = false }
+
+[dev-dependencies]
+embedded-io-adapters = { version = "0.7.0", features = ["tokio-1"] }
+rand = "0.10.3"
+rand_core_06 = { package = "rand_core", version = "0.6.4", features = ["getrandom"] }
+rcgen = "0.14.10"
+tokio = { version = "1.54.1", features = ["macros", "rt-multi-thread", "net"] }
+tokio-rustls = { version = "0.26.6", default-features = false, features = ["ring", "tls12"] }
+
+# not part of the workspace of the library
+[workspace]

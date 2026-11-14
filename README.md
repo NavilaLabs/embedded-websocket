@@ -68,6 +68,21 @@ cargo run --example client
 cargo run --example client_async --features asynch
 ```
 
+### On hardware with embassy-net
+
+`examples/embassy-pico-w` (Raspberry Pi Pico W) and `examples/embassy-esp32c3` (ESP32-C3) join a WiFi network, send one message to a `wss://` echo server over TLS 1.3 with [embedded-tls](https://crates.io/crates/embedded-tls), and then serve a `ws://` echo server on port 80. The application code is shared in `examples/embassy-common`; each board crate only sets up the chip, the WiFi driver and [embassy-net](https://crates.io/crates/embassy-net). They are separate crates with their own targets and are not part of the published package.
+
+The client verifies the server certificate against one certificate authority and the host name. Only ECDSA P-256 and P-384 certificates are supported, and the validity period is not checked because the boards have no clock. Configure the examples at build time:
+
+```
+cd examples/embassy-pico-w        # or examples/embassy-esp32c3
+./fetch-firmware.sh               # Pico W only: the firmware of the WiFi chip
+WIFI_SSID=... WIFI_PASSWORD=... WSS_HOST=echo.example.com WSS_PATH=/ \
+WSS_CA_DER=/path/to/root-ca.der cargo run --release
+```
+
+Without `WSS_CA_DER` the examples skip the `wss://` client. `cargo run` flashes with [probe-rs](https://probe.rs) for the Pico W and [espflash](https://github.com/esp-rs/espflash) for the ESP32-C3. `cargo test` in `examples/embassy-common` runs the client against a local TLS server, including the rejection of a wrong authority and a wrong host name.
+
 or open `http://127.0.0.1:1337/` in your browser.
 
 ## Example websocket client usage

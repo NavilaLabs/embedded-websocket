@@ -1,0 +1,30 @@
+[package]
+name = "embassy-esp32c3"
+version = "0.0.0"
+edition = "2021"
+publish = false
+description = "A wss:// client and a ws:// echo server on an ESP32-C3"
+
+[dependencies]
+embassy-common = { path = "../embassy-common" }
+
+embassy-executor = "0.10.0"
+embassy-net = { version = "0.9.1", features = ["tcp", "dhcpv4", "dns", "proto-ipv4", "medium-ethernet"] }
+embassy-time = "0.5.1"
+esp-alloc = { version = "0.11.0", features = ["esp32c3"] }
+esp-backtrace = { version = "0.20.0", features = ["esp32c3", "panic-handler", "println"] }
+esp-bootloader-esp-idf = { version = "0.6.0", features = ["esp32c3"] }
+esp-hal = { version = "1.2.2", features = ["esp32c3", "unstable"] }
+esp-println = { version = "0.18.0", features = ["esp32c3"] }
+esp-radio = { version = "1.0.0-beta.1", features = ["esp32c3", "wifi"] }
+esp-rtos = { version = "0.4.0", features = ["esp32c3", "esp-radio", "embassy"] }
+static_cell = "2.1.1"
+
+[profile.release]
+debug = 2
+lto = "fat"
+codegen-units = 1
+opt-level = "s"
+
+# not part of the workspace of the library
+[workspace]

@@ -52,6 +52,27 @@ jobs:
         env:
           RUSTDOCFLAGS: -D warnings
 
+  embassy-examples:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.100.0
+        with:
+          components: clippy
+          targets: thumbv6m-none-eabi, riscv32imc-unknown-none-elf
+      - name: Test the shared example code against a local TLS server
+        working-directory: examples/embassy-common
+        run: cargo clippy --all-targets && cargo test
+      - name: Build the Raspberry Pi Pico W example
+        working-directory: examples/embassy-pico-w
+        run: ./fetch-firmware.sh && cargo clippy --release && cargo build --release
+      - name: Build the ESP32-C3 example
+        working-directory: examples/embassy-esp32c3
+        # RUSTFLAGS replaces the linker arguments of .cargo/config.toml
+        env:
+          RUSTFLAGS: -D warnings -C link-arg=-Tlinkall.x -C force-frame-pointers
+        run: cargo clippy --release && cargo build --release
+
   fuzz:
     if: github.event_name == 'pull_request' || github.ref == 'refs/heads/master'
     runs-on: ubuntu-latest
