@@ -796,6 +796,9 @@ where
     ///   multiple write calls with `end_of_message` set to `false` and the final call set to `true`
     /// * Returns `InvalidFrameLength` when the payload of a Ping, Pong or CloseReply is longer
     ///   than 125 bytes
+    /// * Returns `InvalidFrameLength`, `InvalidCloseStatusCode` or `Utf8Error` when the payload
+    ///   of a CloseReply is not empty and not a status code that may be sent followed by UTF-8
+    ///   (RFC 6455 section 5.5.1)
     pub fn write(
         &mut self,
         message_type: WebSocketSendMessageType,
@@ -828,6 +831,9 @@ where
                 if from.len() > MAX_CONTROL_FRAME_PAYLOAD_LEN {
                     return Err(Error::InvalidFrameLength);
                 }
+                if op_code == WebSocketOpCode::ConnectionClose {
+                    validate_close_payload(from)?;
+                }
                 // Control frames are never fragmented and may be sent between the frames of a
                 // fragmented message (RFC 6455 section 5.5).
                 let len = self.write_frame(from, to, op_code, true)?;
@@ -845,8 +851,13 @@ where
     ///
     /// A `status_description` longer than 123 bytes is cut at the last character that fits, so
     /// the close frame stays within the 125 bytes a control frame may carry.
+    ///
+    /// [`WebSocketCloseStatusCode::Empty`] sends a close frame without status code and without
+    /// `status_description`, because a reason needs a status code before it.
     /// # Errors
     /// * Returns `WebSocketNotOpen` when the websocket is not open when this function is called
+    /// * Returns `InvalidCloseStatusCode` when `close_status` is a code that must not be sent
+    ///   (RFC 6455 section 7.4), such as 1004, 1006, 1015 or a code outside 1000-4999
     /// * Returns `WriteToBufferTooSmall` when the `to` buffer is too small to fit the websocket
     ///   frame header (2-14 bytes) plus the payload. Consider sending a smaller status_description
     pub fn close(
@@ -859,13 +870,20 @@ where
             return Err(Error::WebSocketNotOpen);
         }
         let mut payload: Vec<u8, MAX_CONTROL_FRAME_PAYLOAD_LEN> = Vec::new();
-        payload.extend_from_slice(&close_status.to_u16().to_be_bytes())?;
-        if let Some(status_description) = status_description {
-            let mut len = status_description.len().min(payload.capacity() - 2);
-            while !status_description.is_char_boundary(len) {
-                len -= 1;
+        // RFC 6455 section 5.5.1: a reason needs a status code before it
+        if close_status != WebSocketCloseStatusCode::Empty {
+            let code = close_status.to_u16();
+            if !is_valid_close_status_code(code) {
+                return Err(Error::InvalidCloseStatusCode);
             }
-            payload.extend_from_slice(&status_description.as_bytes()[..len])?;
+            payload.extend_from_slice(&code.to_be_bytes())?;
+            if let Some(status_description) = status_description {
+                let mut len = status_description.len().min(payload.capacity() - 2);
+                while !status_description.is_char_boundary(len) {
+                    len -= 1;
+                }
+                payload.extend_from_slice(&status_description.as_bytes()[..len])?;
+            }
         }
         let len = self.write_frame(&payload, to, WebSocketOpCode::ConnectionClose, true)?;
         self.state = WebSocketState::CloseSent;
@@ -1518,6 +1536,62 @@ mod tests {
             .unwrap();
         assert_eq!(&to[..len], &[0x88, 0x05, 0x03, 0xE8, b'b', b'y', b'e']);
         assert_eq!(ws_server.state, WebSocketState::CloseSent);
+    }
+
+    #[test]
+    fn close_without_status_code_sends_no_payload() {
+        let mut ws_server = open_server();
+        let mut to = [0; 16];
+        let len = ws_server
+            .close(WebSocketCloseStatusCode::Empty, Some("bye"), &mut to)
+            .unwrap();
+        assert_eq!(&to[..len], &[0x88, 0x00]);
+        assert_eq!(ws_server.state, WebSocketState::CloseSent);
+    }
+
+    #[test]
+    fn close_with_a_status_code_that_must_not_be_sent_is_rejected() {
+        for status in [
+            WebSocketCloseStatusCode::Reserved,
+            WebSocketCloseStatusCode::TlsHandshake,
+            WebSocketCloseStatusCode::Custom(999),
+            WebSocketCloseStatusCode::Custom(1006),
+            WebSocketCloseStatusCode::Custom(2999),
+            WebSocketCloseStatusCode::Custom(5000),
+        ] {
+            let mut ws_server = open_server();
+            let mut to = [0; 16];
+            assert_eq!(
+                ws_server.close(status, None, &mut to),
+                Err(Error::InvalidCloseStatusCode),
+                "{status:?}"
+            );
+            assert_eq!(ws_server.state, WebSocketState::Open);
+        }
+        for status in [1012, 3000, 4999] {
+            let mut to = [0; 16];
+            assert!(open_server()
+                .close(WebSocketCloseStatusCode::Custom(status), None, &mut to)
+                .is_ok());
+        }
+    }
+
+    #[test]
+    fn close_reply_with_an_invalid_payload_is_rejected() {
+        for (payload, error) in [
+            (&[0x03][..], Error::InvalidFrameLength),
+            (&[0x03, 0xED], Error::InvalidCloseStatusCode),
+            (&[0x03, 0xE8, 0xFF], Error::Utf8Error),
+        ] {
+            let mut ws_server = open_server();
+            ws_server.state = WebSocketState::CloseReceived;
+            let mut to = [0; 16];
+            assert_eq!(
+                ws_server.write(WebSocketSendMessageType::CloseReply, true, payload, &mut to),
+                Err(error)
+            );
+            assert_eq!(ws_server.state, WebSocketState::CloseReceived);
+        }
     }
 
     #[test]

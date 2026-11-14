@@ -296,7 +296,11 @@ where
     /// # Errors
     ///
     /// * [`FramerError::Io`] if writing to the stream fails.
-    /// * [`FramerError::WebSocket`] if the websocket is not open.
+    /// * [`FramerError::WebSocket`] if the websocket is not open, or with
+    ///   [`Error::InvalidCloseStatusCode`] if `close_status` must not be sent (RFC 6455
+    ///   section 7.4).
+    ///
+    /// [`Error::InvalidCloseStatusCode`]: crate::Error::InvalidCloseStatusCode
     pub async fn close<S>(
         &mut self,
         stream: &mut S,
