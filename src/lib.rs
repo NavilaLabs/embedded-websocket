@@ -274,6 +274,7 @@ pub enum WebSocketState {
 /// Websocket specific errors
 #[derive(PartialEq, Eq, Debug, Clone)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[non_exhaustive]
 pub enum Error {
     /// Websocket frame has an invalid opcode
     InvalidOpCode,
