@@ -304,6 +304,9 @@ pub enum Error {
     AcceptStringInvalid,
     /// The sub protocol of the opening handshake is not one the client offered
     SubProtocolNotOffered,
+    /// The sub protocols a client offers are not unique and non-empty HTTP tokens
+    /// (RFC 6455 section 4.1)
+    InvalidSubProtocol,
     /// A conversion that cannot fail failed
     ConvertInfallible,
     /// A continuation frame arrives without a fragmented message to continue
@@ -422,8 +425,8 @@ pub struct WebSocketOptions<'a> {
     /// it.
     pub origin: Option<&'a str>,
     /// A list of requested sub protocols in order of preference. The server should return the
-    /// first sub protocol it supports or none at all. A sub protocol can be anything agreed
-    /// between the server and client
+    /// first sub protocol it supports or none at all. Each sub protocol is an HTTP token, for
+    /// example `chat` or `v2.json`, and appears once. An empty list sends no sub protocols
     pub sub_protocols: Option<&'a [&'a str]>,
     /// Any additional headers the server may require that are not part of the websocket
     /// spec. These should be fully formed http headers without the `\r\n` (e.g. `MyHeader: foo`)
@@ -616,6 +619,8 @@ where
     /// # Errors
     /// * Returns `WriteToBufferTooSmall` if the request does not fit into `to`
     /// * Returns `WebsocketAlreadyOpen` if called on a websocket that is already open
+    /// * Returns `InvalidSubProtocol` if the sub protocols of `websocket_options` are not
+    ///   unique HTTP tokens
     pub fn client_connect(
         &mut self,
         websocket_options: &WebSocketOptions,

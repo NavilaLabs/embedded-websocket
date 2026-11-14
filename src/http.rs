@@ -96,14 +96,19 @@ pub(crate) fn build_connect_handshake_request(
         http_request.push(origin)?;
     }
 
-    // turn sub protocol list into a CSV list
-    if let Some(sub_protocols) = websocket_options.sub_protocols {
+    if let Some(sub_protocols) = websocket_options
+        .sub_protocols
+        .filter(|sub_protocols| !sub_protocols.is_empty())
+    {
+        if !are_unique_tokens(sub_protocols) {
+            return Err(Error::InvalidSubProtocol);
+        }
         http_request.push("\r\nSec-WebSocket-Protocol: ")?;
-        for (i, sub_protocol) in sub_protocols.iter().enumerate() {
-            http_request.push(sub_protocol)?;
-            if i < (sub_protocols.len() - 1) {
+        for (index, sub_protocol) in sub_protocols.iter().enumerate() {
+            if index > 0 {
                 http_request.push(", ")?;
             }
+            http_request.push(sub_protocol)?;
         }
     }
     http_request.push("\r\n")?;
@@ -117,6 +122,18 @@ pub(crate) fn build_connect_handshake_request(
 
     http_request.push("Sec-WebSocket-Version: 13\r\n\r\n")?;
     Ok((http_request.len, sec_websocket_key))
+}
+
+// RFC 6455 section 4.1, item 10
+fn are_unique_tokens(sub_protocols: &[&str]) -> bool {
+    sub_protocols
+        .iter()
+        .enumerate()
+        .all(|(index, sub_protocol)| {
+            !sub_protocol.is_empty()
+                && sub_protocol.bytes().all(head::is_token_byte)
+                && !sub_protocols[..index].contains(sub_protocol)
+        })
 }
 
 pub(crate) fn build_connect_handshake_response(
@@ -214,6 +231,47 @@ mod tests {
             build_connect_handshake_response(&key(), None, &mut to[..len - 1]).err(),
             Some(Error::WriteToBufferTooSmall)
         );
+    }
+
+    fn request_with_sub_protocols(sub_protocols: &[&str]) -> Result<std::string::String> {
+        let options = WebSocketOptions {
+            path: "/",
+            host: "localhost",
+            origin: None,
+            sub_protocols: Some(sub_protocols),
+            additional_headers: None,
+        };
+        let mut to = [0; 1024];
+        let (len, _) = build_connect_handshake_request(&options, &mut rand::rng(), &mut to)?;
+        Ok(std::string::String::from_utf8(to[..len].to_vec()).unwrap())
+    }
+
+    #[test]
+    fn empty_sub_protocol_list_sends_no_header() {
+        let request = request_with_sub_protocols(&[]).unwrap();
+        assert!(!request.contains("Sec-WebSocket-Protocol"), "{request}");
+    }
+
+    #[test]
+    fn sub_protocols_that_are_not_unique_tokens_are_rejected() {
+        for sub_protocols in [
+            &[""][..],
+            &["chat", ""],
+            &["a b"],
+            &["a,b"],
+            &["chat\r\nX: y"],
+            &["chät"],
+            &["chat", "chat"],
+        ] {
+            assert_eq!(
+                request_with_sub_protocols(sub_protocols),
+                Err(Error::InvalidSubProtocol),
+                "{sub_protocols:?}"
+            );
+        }
+        assert!(request_with_sub_protocols(&["chat", "Chat", "v1.json~"])
+            .unwrap()
+            .contains("\r\nSec-WebSocket-Protocol: chat, Chat, v1.json~\r\n"));
     }
 
     #[test]

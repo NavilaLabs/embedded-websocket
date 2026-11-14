@@ -82,9 +82,12 @@ where
     /// * [`FramerError::Io`] if reading from or writing to the stream fails.
     /// * [`FramerError::WebSocket`] with [`Error::HttpHeaderIncomplete`] if the stream ends or
     ///   the read buffer is full before the HTTP response header is complete.
+    /// * [`FramerError::WebSocket`] with [`Error::InvalidSubProtocol`] if the sub protocols of
+    ///   `websocket_options` are not unique HTTP tokens.
     /// * [`FramerError::WebSocket`] if the server rejects the opening handshake.
     ///
     /// [`Error::HttpHeaderIncomplete`]: crate::Error::HttpHeaderIncomplete
+    /// [`Error::InvalidSubProtocol`]: crate::Error::InvalidSubProtocol
     pub fn connect<'o, S>(
         &mut self,
         stream: &mut S,
