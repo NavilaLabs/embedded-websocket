@@ -573,7 +573,8 @@ where
     /// # Errors
     ///
     /// * [`Error::NotAnUpgrade`] if the request is not a valid websocket upgrade (RFC 6455
-    ///   section 4.2.1). `to` then holds the response that rejects it.
+    ///   section 4.2.1) or has a body, which would be read as frames. `to` then holds the
+    ///   response that rejects it.
     /// * [`Error::SubProtocolNotOffered`] if the client did not offer `sub_protocol`.
     /// * [`Error::WriteToBufferTooSmall`] if the response does not fit into `to`.
     /// * [`Error::WebsocketAlreadyOpen`] if the websocket is already open.

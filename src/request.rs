@@ -79,6 +79,7 @@ impl<'a> Request<'a> {
         if self.method != "GET"
             || !self.head.has_token("upgrade", "websocket")
             || !self.head.has_token("connection", "upgrade")
+            || self.has_body()
         {
             return Err(BAD_REQUEST);
         }
@@ -96,6 +97,17 @@ impl<'a> Request<'a> {
             .filter(|key| is_sixteen_base64_encoded_bytes(key))
             .and_then(|key| WebSocketKey::try_from(key).ok())
             .ok_or(BAD_REQUEST)
+    }
+
+    // RFC 9112 section 6.3: a request has a body if it has Transfer-Encoding or a Content-Length
+    // other than 0. The bytes after the head of an upgrade are frames, so a body would be read as
+    // frames.
+    fn has_body(&self) -> bool {
+        self.head.field("transfer-encoding").is_some()
+            || !matches!(
+                self.head.unique_field("content-length"),
+                Ok(None | Some(b"0"))
+            )
     }
 }
 
@@ -224,6 +236,29 @@ mod tests {
                 Some(Error::HttpHeaderInvalid),
                 "{hosts:?}"
             );
+        }
+    }
+
+    fn upgrade_key_with(fields: &str) -> core::result::Result<WebSocketKey, &'static [u8]> {
+        let head = format!(
+            "GET / HTTP/1.1\r\nHost: a\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\
+             Sec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\
+             {fields}\r\n"
+        );
+        Request::parse(head.as_bytes()).unwrap().upgrade_key()
+    }
+
+    // The bytes after the head are read as frames, so a body would be read as frames as well.
+    #[test]
+    fn upgrade_with_a_body_is_rejected() {
+        assert!(upgrade_key_with("Content-Length: 0\r\n").is_ok());
+        for fields in [
+            "Content-Length: 5\r\n",
+            "Content-Length: 0\r\nContent-Length: 0\r\n",
+            "Content-Length: x\r\n",
+            "Transfer-Encoding: chunked\r\n",
+        ] {
+            assert_eq!(upgrade_key_with(fields), Err(BAD_REQUEST), "{fields}");
         }
     }
 
