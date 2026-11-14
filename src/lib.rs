@@ -820,19 +820,21 @@ where
                 } else {
                     op_code
                 };
+                let len = self.write_frame(from, to, op_code, end_of_message)?;
                 self.is_write_continuation = !end_of_message;
-                self.write_frame(from, to, op_code, end_of_message)
+                Ok(len)
             }
             _ => {
                 if from.len() > MAX_CONTROL_FRAME_PAYLOAD_LEN {
                     return Err(Error::InvalidFrameLength);
                 }
+                // Control frames are never fragmented and may be sent between the frames of a
+                // fragmented message (RFC 6455 section 5.5).
+                let len = self.write_frame(from, to, op_code, true)?;
                 if op_code == WebSocketOpCode::ConnectionClose {
                     self.state = WebSocketState::Closed
                 }
-                // Control frames are never fragmented and may be sent between the frames of a
-                // fragmented message (RFC 6455 section 5.5).
-                self.write_frame(from, to, op_code, true)
+                Ok(len)
             }
         }
     }
@@ -853,25 +855,21 @@ where
         status_description: Option<&str>,
         to: &mut [u8],
     ) -> Result<usize> {
-        if self.state == WebSocketState::Open {
-            self.state = WebSocketState::CloseSent;
-            if let Some(status_description) = status_description {
-                let mut from_buffer: Vec<u8, MAX_CONTROL_FRAME_PAYLOAD_LEN> = Vec::new();
-                from_buffer.extend_from_slice(&close_status.to_u16().to_be_bytes())?;
-
-                let mut len = status_description.len().min(from_buffer.capacity() - 2);
-                while !status_description.is_char_boundary(len) {
-                    len -= 1;
-                }
-                from_buffer.extend_from_slice(&status_description.as_bytes()[..len])?;
-                self.write_frame(&from_buffer, to, WebSocketOpCode::ConnectionClose, true)
-            } else {
-                let from_buffer = close_status.to_u16().to_be_bytes();
-                self.write_frame(&from_buffer, to, WebSocketOpCode::ConnectionClose, true)
-            }
-        } else {
-            Err(Error::WebSocketNotOpen)
+        if self.state != WebSocketState::Open {
+            return Err(Error::WebSocketNotOpen);
         }
+        let mut payload: Vec<u8, MAX_CONTROL_FRAME_PAYLOAD_LEN> = Vec::new();
+        payload.extend_from_slice(&close_status.to_u16().to_be_bytes())?;
+        if let Some(status_description) = status_description {
+            let mut len = status_description.len().min(payload.capacity() - 2);
+            while !status_description.is_char_boundary(len) {
+                len -= 1;
+            }
+            payload.extend_from_slice(&status_description.as_bytes()[..len])?;
+        }
+        let len = self.write_frame(&payload, to, WebSocketOpCode::ConnectionClose, true)?;
+        self.state = WebSocketState::CloseSent;
+        Ok(len)
     }
 
     fn next_control_frame_len(&self, from_buffer: &[u8]) -> Result<Option<FrameLen>> {
@@ -1462,6 +1460,91 @@ mod tests {
         ] {
             assert_eq!(read_frames(frame, 1).err(), expected, "{frame:x?}");
         }
+    }
+
+    fn open_server() -> WebSocketServer {
+        let mut ws_server = WebSocketServer::new_server();
+        ws_server.state = WebSocketState::Open;
+        ws_server
+    }
+
+    #[test]
+    fn write_that_does_not_fit_can_be_retried_in_fragments() {
+        let mut ws_server = open_server();
+        let mut to = [0; 8];
+        let mut first_byte_of = |end_of_message: bool, payload: &[u8]| {
+            ws_server
+                .write(
+                    WebSocketSendMessageType::Text,
+                    end_of_message,
+                    payload,
+                    &mut to,
+                )
+                .map(|_| to[0])
+        };
+        assert_eq!(
+            first_byte_of(false, b"too long"),
+            Err(Error::WriteToBufferTooSmall)
+        );
+        assert_eq!(first_byte_of(true, b"short"), Ok(0x81));
+
+        assert_eq!(first_byte_of(false, b"too"), Ok(0x01));
+        assert_eq!(
+            first_byte_of(true, b" long!!"),
+            Err(Error::WriteToBufferTooSmall)
+        );
+        assert_eq!(first_byte_of(true, b" lo"), Ok(0x80));
+    }
+
+    #[test]
+    fn close_that_does_not_fit_can_be_retried() {
+        let mut ws_server = open_server();
+        let mut to = [0; 8];
+        assert_eq!(
+            ws_server.close(
+                WebSocketCloseStatusCode::NormalClosure,
+                Some("bye now"),
+                &mut to
+            ),
+            Err(Error::WriteToBufferTooSmall)
+        );
+        assert_eq!(ws_server.state, WebSocketState::Open);
+        let len = ws_server
+            .close(
+                WebSocketCloseStatusCode::NormalClosure,
+                Some("bye"),
+                &mut to,
+            )
+            .unwrap();
+        assert_eq!(&to[..len], &[0x88, 0x05, 0x03, 0xE8, b'b', b'y', b'e']);
+        assert_eq!(ws_server.state, WebSocketState::CloseSent);
+    }
+
+    #[test]
+    fn close_reply_that_does_not_fit_can_be_retried() {
+        let mut ws_server = open_server();
+        ws_server.state = WebSocketState::CloseReceived;
+        let mut to = [0; 3];
+        assert_eq!(
+            ws_server.write(
+                WebSocketSendMessageType::CloseReply,
+                true,
+                &[0x03, 0xE8],
+                &mut to
+            ),
+            Err(Error::WriteToBufferTooSmall)
+        );
+        assert_eq!(ws_server.state, WebSocketState::CloseReceived);
+        let mut to = [0; 4];
+        ws_server
+            .write(
+                WebSocketSendMessageType::CloseReply,
+                true,
+                &[0x03, 0xE8],
+                &mut to,
+            )
+            .unwrap();
+        assert_eq!(ws_server.state, WebSocketState::Closed);
     }
 
     #[test]
