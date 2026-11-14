@@ -74,6 +74,19 @@ impl<'a> Head<'a> {
             .map(|(_, value)| value)
     }
 
+    /// The value of the header field called `name`, compared case-insensitively, or an error if
+    /// there is more than one.
+    pub(crate) fn unique_field(&self, name: &str) -> Result<Option<&'a [u8]>> {
+        let mut values = self
+            .fields()
+            .filter(|(field, _)| field.eq_ignore_ascii_case(name))
+            .map(|(_, value)| value);
+        match (values.next(), values.next()) {
+            (value, None) => Ok(value),
+            (_, Some(_)) => Err(Error::HttpHeaderInvalid),
+        }
+    }
+
     /// The comma-separated elements of all header fields called `name` (RFC 9110 section 5.3).
     pub(crate) fn tokens(&self, name: &'a str) -> impl Iterator<Item = &'a str> {
         self.fields()

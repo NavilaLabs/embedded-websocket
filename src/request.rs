@@ -82,10 +82,16 @@ impl<'a> Request<'a> {
         {
             return Err(BAD_REQUEST);
         }
-        if self.header("sec-websocket-version") != Some(b"13") {
+        let version = self
+            .head
+            .unique_field("sec-websocket-version")
+            .map_err(|_| BAD_REQUEST)?;
+        if version != Some(b"13") {
             return Err(UPGRADE_REQUIRED);
         }
-        self.header("sec-websocket-key")
+        self.head
+            .unique_field("sec-websocket-key")
+            .map_err(|_| BAD_REQUEST)?
             .and_then(|key| str::from_utf8(key).ok())
             .filter(|key| is_sixteen_base64_encoded_bytes(key))
             .and_then(|key| WebSocketKey::try_from(key).ok())
@@ -95,11 +101,8 @@ impl<'a> Request<'a> {
 
 // RFC 9112 section 3.2: a server must reject a request without exactly one valid Host field
 fn has_one_valid_host(head: &Head<'_>) -> bool {
-    let mut hosts = head
-        .fields()
-        .filter(|(name, _)| name.eq_ignore_ascii_case("host"));
-    match (hosts.next(), hosts.next()) {
-        (Some((_, value)), None) => str::from_utf8(value).is_ok_and(is_valid_host),
+    match head.unique_field("host") {
+        Ok(Some(value)) => str::from_utf8(value).is_ok_and(is_valid_host),
         _ => false,
     }
 }
@@ -221,6 +224,24 @@ mod tests {
                 Some(Error::HttpHeaderInvalid),
                 "{hosts:?}"
             );
+        }
+    }
+
+    // RFC 6455 section 11.3.1 and 11.3.5: neither field may appear more than once
+    #[test]
+    fn repeated_key_or_version_is_rejected() {
+        let key = "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n";
+        let version = "Sec-WebSocket-Version: 13\r\n";
+        for fields in [
+            format!("{key}{key}{version}"),
+            format!("{key}{version}{version}"),
+        ] {
+            let head = format!(
+                "GET / HTTP/1.1\r\nHost: a\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\
+                 {fields}\r\n"
+            );
+            let request = Request::parse(head.as_bytes()).unwrap();
+            assert_eq!(request.upgrade_key(), Err(BAD_REQUEST), "{fields}");
         }
     }
 

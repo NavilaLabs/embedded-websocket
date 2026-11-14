@@ -47,14 +47,14 @@ pub(crate) fn read_server_connect_handshake_response<'o>(
 
     let mut expected_accept_string = [0; 28];
     build_accept_string(sec_websocket_key, &mut expected_accept_string)?;
-    if response.field("sec-websocket-accept") != Some(&expected_accept_string[..]) {
+    if response.unique_field("sec-websocket-accept")? != Some(&expected_accept_string[..]) {
         return Err(Error::AcceptStringInvalid);
     }
     if response.tokens("sec-websocket-extensions").next().is_some() {
         return Err(Error::ExtensionNotOffered);
     }
 
-    let sub_protocol = match response.field("sec-websocket-protocol") {
+    let sub_protocol = match response.unique_field("sec-websocket-protocol")? {
         Some(sub_protocol) => {
             let sub_protocol = str::from_utf8(sub_protocol)?;
             let offered = offered_sub_protocols
@@ -245,6 +245,31 @@ mod tests {
             read_server_connect_handshake_response(&key(), None, response),
             Err(Error::ExtensionNotOffered)
         );
+    }
+
+    // RFC 6455 section 11.3.3 and 11.3.4: neither field may appear more than once
+    #[test]
+    fn response_with_a_repeated_accept_or_protocol_is_rejected() {
+        let accept = "Sec-WebSocket-Accept: ptPnPeDOTo6khJlzmLhOZSh2tAY=\r\n";
+        let protocol = "Sec-WebSocket-Protocol: chat\r\n";
+        for fields in [
+            std::format!("{accept}{accept}"),
+            std::format!("{accept}{protocol}{protocol}"),
+        ] {
+            let response = std::format!(
+                "HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\
+                 {fields}\r\n"
+            );
+            assert_eq!(
+                read_server_connect_handshake_response(
+                    &key(),
+                    Some(&["chat"]),
+                    response.as_bytes()
+                ),
+                Err(Error::HttpHeaderInvalid),
+                "{fields}"
+            );
+        }
     }
 
     #[test]
