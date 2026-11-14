@@ -111,16 +111,19 @@ fn lines(mut bytes: &[u8]) -> impl Iterator<Item = &[u8]> {
 }
 
 // RFC 9110 section 5: field-name ":" OWS field-value OWS, without obsolete line folding
-fn is_valid_field(line: &[u8]) -> bool {
+pub(crate) fn is_valid_field(line: &[u8]) -> bool {
     let Some(colon) = line.iter().position(|&byte| byte == b':') else {
         return false;
     };
     let (name, value) = (&line[..colon], &line[colon + 1..]);
-    !name.is_empty()
-        && name.iter().all(|&byte| is_token_byte(byte))
-        && value
-            .iter()
-            .all(|&byte| byte == b'\t' || byte >= 0x20 && byte != 0x7F)
+    !name.is_empty() && name.iter().all(|&byte| is_token_byte(byte)) && is_valid_field_value(value)
+}
+
+// RFC 9110 section 5.5, including the whitespace around the value
+pub(crate) fn is_valid_field_value(value: &[u8]) -> bool {
+    value
+        .iter()
+        .all(|&byte| byte == b'\t' || byte >= 0x20 && byte != 0x7F)
 }
 
 // RFC 9110 section 5.6.2

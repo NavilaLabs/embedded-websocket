@@ -84,10 +84,13 @@ where
     ///   the read buffer is full before the HTTP response header is complete.
     /// * [`FramerError::WebSocket`] with [`Error::InvalidSubProtocol`] if the sub protocols of
     ///   `websocket_options` are not unique HTTP tokens.
+    /// * [`FramerError::WebSocket`] with [`Error::HttpHeaderInvalid`] if a part of
+    ///   `websocket_options` cannot be sent as it is, see [`WebSocketOptions`].
     /// * [`FramerError::WebSocket`] if the server rejects the opening handshake.
     ///
     /// [`Error::HttpHeaderIncomplete`]: crate::Error::HttpHeaderIncomplete
     /// [`Error::InvalidSubProtocol`]: crate::Error::InvalidSubProtocol
+    /// [`Error::HttpHeaderInvalid`]: crate::Error::HttpHeaderInvalid
     pub fn connect<'o, S>(
         &mut self,
         stream: &mut S,

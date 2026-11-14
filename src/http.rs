@@ -71,6 +71,9 @@ pub(crate) fn build_connect_handshake_request(
     rng: &mut impl Rng,
     to: &mut [u8],
 ) -> Result<(usize, WebSocketKey)> {
+    if !can_be_sent(websocket_options) {
+        return Err(Error::HttpHeaderInvalid);
+    }
     let mut http_request = Output::new(to);
     let mut key_as_base64: [u8; 24] = [0; 24];
 
@@ -122,6 +125,25 @@ pub(crate) fn build_connect_handshake_request(
 
     http_request.push("Sec-WebSocket-Version: 13\r\n\r\n")?;
     Ok((http_request.len, sec_websocket_key))
+}
+
+// Each option must stay within its part of the request head, so none can end a line and add
+// header fields of its own: the request target of RFC 9112 section 3.2 has no whitespace or
+// control characters, and field values and lines follow RFC 9110 section 5.
+fn can_be_sent(websocket_options: &WebSocketOptions) -> bool {
+    websocket_options
+        .path
+        .bytes()
+        .all(|byte| byte.is_ascii_graphic())
+        && head::is_valid_field_value(websocket_options.host.as_bytes())
+        && websocket_options
+            .origin
+            .is_none_or(|origin| head::is_valid_field_value(origin.as_bytes()))
+        && websocket_options
+            .additional_headers
+            .unwrap_or_default()
+            .iter()
+            .all(|header| head::is_valid_field(header.as_bytes()))
 }
 
 // RFC 6455 section 4.1, item 10
@@ -244,6 +266,78 @@ mod tests {
         let mut to = [0; 1024];
         let (len, _) = build_connect_handshake_request(&options, &mut rand::rng(), &mut to)?;
         Ok(std::string::String::from_utf8(to[..len].to_vec()).unwrap())
+    }
+
+    #[test]
+    fn request_fields_that_would_break_the_head_are_rejected() {
+        let valid = WebSocketOptions {
+            path: "/chat?room=1",
+            host: "localhost:8080",
+            origin: Some("http://localhost"),
+            sub_protocols: None,
+            additional_headers: Some(&["Authorization: Bearer a.b", "X-Empty:"]),
+        };
+        let mut to = [0; 1024];
+        assert!(build_connect_handshake_request(&valid, &mut rand::rng(), &mut to).is_ok());
+
+        let injected = "a\r\nX-Injected: 1";
+        let invalid = [
+            WebSocketOptions {
+                path: injected,
+                ..valid
+            },
+            WebSocketOptions {
+                path: "/a b",
+                ..valid
+            },
+            WebSocketOptions {
+                path: "/a\tb",
+                ..valid
+            },
+            WebSocketOptions {
+                host: injected,
+                ..valid
+            },
+            WebSocketOptions {
+                host: "a\nb",
+                ..valid
+            },
+            WebSocketOptions {
+                host: "a\0b",
+                ..valid
+            },
+            WebSocketOptions {
+                origin: Some(injected),
+                ..valid
+            },
+            WebSocketOptions {
+                additional_headers: Some(&[injected]),
+                ..valid
+            },
+            WebSocketOptions {
+                additional_headers: Some(&["no colon"]),
+                ..valid
+            },
+            WebSocketOptions {
+                additional_headers: Some(&["Bad Name: 1"]),
+                ..valid
+            },
+            WebSocketOptions {
+                additional_headers: Some(&[""]),
+                ..valid
+            },
+        ];
+        for options in invalid {
+            assert_eq!(
+                build_connect_handshake_request(&options, &mut rand::rng(), &mut to).err(),
+                Some(Error::HttpHeaderInvalid),
+                "{:?} {:?} {:?} {:?}",
+                options.path,
+                options.host,
+                options.origin,
+                options.additional_headers
+            );
+        }
     }
 
     #[test]

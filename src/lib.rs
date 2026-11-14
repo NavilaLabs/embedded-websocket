@@ -413,6 +413,11 @@ pub struct WebSocketReadResult {
 
 /// Websocket options used by a websocket client to initiate an opening handshake with a
 /// websocket server
+///
+/// Each part is sent as it is, so it must not contain line breaks: the path no whitespace or
+/// control characters (RFC 9112 section 3.2), the host and origin no control characters other
+/// than tab, and each additional header must be a valid `Name: value` field (RFC 9110
+/// section 5).
 pub struct WebSocketOptions<'a> {
     /// The request uri (e.g. `/chat?id=123`) of the GET method used to identify the endpoint of the
     /// websocket connection. A path that does not start with `/` is sent with a `/` in front.
@@ -622,6 +627,8 @@ where
     /// * Returns `WebsocketAlreadyOpen` if called on a websocket that is already open
     /// * Returns `InvalidSubProtocol` if the sub protocols of `websocket_options` are not
     ///   unique HTTP tokens
+    /// * Returns `HttpHeaderInvalid` if a part of `websocket_options` cannot be sent as it is,
+    ///   see [`WebSocketOptions`]
     pub fn client_connect(
         &mut self,
         websocket_options: &WebSocketOptions,
