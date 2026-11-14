@@ -25,6 +25,10 @@ pub enum ReadResult<'a> {
     Pong(&'a [u8]),
     /// The close handshake is complete. Holds the status code and reason the other party sent,
     /// or [`WebSocketCloseStatusCode::Empty`] and an empty reason if it sent none.
+    ///
+    /// Then close the connection: a server at once, a client after the server closed it, or
+    /// after a timeout of your choice if the server does not (RFC 6455 section 7.1.1). This way
+    /// the server, not the client, keeps the TCP `TIME_WAIT` state.
     Closed {
         /// The status code of the other party.
         status: WebSocketCloseStatusCode,

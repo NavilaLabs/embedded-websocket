@@ -14,6 +14,11 @@ pub(crate) const BAD_REQUEST: &[u8] =
 const UPGRADE_REQUIRED: &[u8] = b"HTTP/1.1 426 Upgrade Required\r\nSec-WebSocket-Version: 13\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
 
 /// The HTTP request that opens a connection, as seen by a server before it decides how to answer.
+///
+/// A browser lets any web page open a websocket to any server, and sends the cookies of that
+/// server along. A server that browsers connect to should therefore check the `Origin` header,
+/// which browsers always send, against the origins it serves, and reject other requests
+/// (RFC 6455 section 10.2). Clients other than browsers may leave the header out.
 pub struct Request<'a> {
     method: &'a str,
     path: &'a str,

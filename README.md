@@ -151,7 +151,9 @@ while let ReadResult::Text(text) = framer.read(&mut stream, &mut frame_buf)? {
 }
 ```
 
-`request` also gives access to the headers, for example to check `Origin` or an authentication token, and tells whether the client offered a sub protocol.
+`request` also gives access to the headers, for example to check an authentication token, and tells whether the client offered a sub protocol. A server that browsers connect to should check `Origin` against the origins it serves, because a browser lets any web page connect and sends the cookies of the server along (RFC 6455 section 10.2).
+
+After `ReadResult::Closed`, a server closes the connection at once. A client waits for the server to close it, or closes it itself after a timeout, as RFC 6455 section 7.1.1 asks.
 
 ## Testing
 

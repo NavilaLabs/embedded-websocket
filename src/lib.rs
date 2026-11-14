@@ -698,7 +698,9 @@ where
     ///   `sub_protocols`
     /// * Returns `ExtensionNotOffered` if the server chose an extension, because the client offers
     ///   none
-    /// * Returns `HttpHeader(Version)` or some other varient if the HTTP response is not well formed
+    /// * Returns `HttpHeaderInvalid` if the HTTP response is not well formed, also if a header
+    ///   field continues on the next line: RFC 9112 section 5.2 asks a client to replace this
+    ///   obsolete line folding with spaces, but like most HTTP parsers this one rejects it
     /// * Returns `WebsocketAlreadyOpen` if called on a websocket that is already open
     pub fn client_accept<'o>(
         &mut self,
