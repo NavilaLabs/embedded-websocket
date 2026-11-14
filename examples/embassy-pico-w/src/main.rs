@@ -5,9 +5,10 @@
 //!
 //! * `WIFI_SSID` and `WIFI_PASSWORD`: the network to join.
 //! * `WSS_HOST` and `WSS_PATH`: the `wss://` server, for example `echo.websocket.org` and `/`.
-//! * `WSS_CA_DER`: path to the DER encoded certificate of the authority that signed the server
-//!   certificate. Only ECDSA P-256 and P-384 certificates are supported. Without it, the example
-//!   skips the `wss://` client.
+//! * `WSS_SERVER_KEY_DER`: path to the public key of the `wss://` server as DER encoded
+//!   SubjectPublicKeyInfo, which must be an ECDSA P-256 key. The client trusts only a server
+//!   that proves it holds the matching private key. Without it, the example skips the `wss://`
+//!   client.
 #![no_std]
 #![no_main]
 
@@ -51,7 +52,7 @@ const WSS_PATH: &str = match option_env!("WSS_PATH") {
     Some(path) => path,
     None => "/",
 };
-const WSS_CA_DER: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/ca.der"));
+const WSS_SERVER_KEY_DER: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/server-key.der"));
 
 // One TLS record is up to 16640 bytes; the messages this example sends are much smaller.
 const TLS_READ_LEN: usize = 16640;
@@ -115,8 +116,8 @@ async fn main(spawner: Spawner) {
     stack.wait_config_up().await;
     info!("network is up");
 
-    if WSS_CA_DER.is_empty() {
-        info!("WSS_CA_DER was not set at build time, skipping the wss:// client");
+    if WSS_SERVER_KEY_DER.is_empty() {
+        info!("WSS_SERVER_KEY_DER was not set at build time, skipping the wss:// client");
     } else {
         wss_client(stack).await;
     }
@@ -151,7 +152,7 @@ async fn wss_client(stack: Stack<'static>) {
     let target = WssTarget {
         host: WSS_HOST,
         path: WSS_PATH,
-        ca_der: WSS_CA_DER,
+        server_key_der: WSS_SERVER_KEY_DER,
     };
     // the ring oscillator of the RP2040 is its only entropy source; embassy-rp treats it as
     // cryptographically secure, a hardened product should add an external source

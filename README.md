@@ -72,16 +72,23 @@ cargo run --example client_async --features asynch
 
 `examples/embassy-pico-w` (Raspberry Pi Pico W) and `examples/embassy-esp32c3` (ESP32-C3) join a WiFi network, send one message to a `wss://` echo server over TLS 1.3 with [embedded-tls](https://crates.io/crates/embedded-tls), and then serve a `ws://` echo server on port 80. The application code is shared in `examples/embassy-common`; each board crate only sets up the chip, the WiFi driver and [embassy-net](https://crates.io/crates/embassy-net). They are separate crates with their own targets and are not part of the published package.
 
-The client verifies the server certificate against one certificate authority and the host name. Only ECDSA P-256 and P-384 certificates are supported, and the validity period is not checked because the boards have no clock. Configure the examples at build time:
+The client pins the public key of the server: it trusts only a server that signs the TLS handshake with the matching private key, and does not look at the certificate, its chain or its names. The key must be an ECDSA P-256 key. Keep it when the certificate is renewed (for example `certbot --reuse-key`), or rebuild the firmware with the new key. Pinning a key instead of a certificate authority avoids two weaknesses of the certificate check of embedded-tls 0.19 without an allocator: it accepts a handshake in which the server proves nothing, and it does not check that the certificates in a chain may issue certificates. Fetch the key of a server with:
+
+```
+openssl s_client -connect echo.example.com:443 -servername echo.example.com </dev/null \
+    | openssl x509 -pubkey -noout | openssl pkey -pubin -outform DER > server-key.der
+```
+
+Configure the examples at build time:
 
 ```
 cd examples/embassy-pico-w        # or examples/embassy-esp32c3
 ./fetch-firmware.sh               # Pico W only: the firmware of the WiFi chip
 WIFI_SSID=... WIFI_PASSWORD=... WSS_HOST=echo.example.com WSS_PATH=/ \
-WSS_CA_DER=/path/to/root-ca.der cargo run --release
+WSS_SERVER_KEY_DER=server-key.der cargo run --release
 ```
 
-Without `WSS_CA_DER` the examples skip the `wss://` client. `cargo run` flashes with [probe-rs](https://probe.rs) for the Pico W and [espflash](https://github.com/esp-rs/espflash) for the ESP32-C3. `cargo test` in `examples/embassy-common` runs the client against a local TLS server, including the rejection of a wrong authority and a wrong host name.
+Without `WSS_SERVER_KEY_DER` the examples skip the `wss://` client. `cargo run` flashes with [probe-rs](https://probe.rs) for the Pico W and [espflash](https://github.com/esp-rs/espflash) for the ESP32-C3. `cargo test` in `examples/embassy-common` runs the client against a local TLS server, and checks that it rejects a server with another key and a server that completes the handshake without signing it.
 
 or open `http://127.0.0.1:1337/` in your browser.
 
