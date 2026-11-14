@@ -443,7 +443,7 @@ mod tests {
     use std::{collections::VecDeque, vec, vec::Vec};
 
     use super::*;
-    use crate::{WebSocketClient, WebSocketOpCode, WebSocketServer};
+    use crate::{EmptyRng, WebSocketClient, WebSocketOpCode, WebSocketServer};
 
     struct BufferStream {
         read_buf: Vec<u8>,
@@ -898,6 +898,94 @@ mod tests {
                 (0x8, true, close_payload(1000, "")),
                 (0xA, true, b"ping".to_vec()),
             ]
+        );
+    }
+
+    // A text message that fills a 200 byte frame buffer, with `control` after its first fragment,
+    // where only 3 bytes of the frame buffer are left.
+    fn full_message_around(control: Vec<u8>) -> Vec<u8> {
+        [
+            client_frame(&[b'a'; 197], WebSocketOpCode::TextFrame, false),
+            control,
+            client_frame(b"bcd", WebSocketOpCode::ContinuationFrame, true),
+        ]
+        .concat()
+    }
+
+    fn read_full_message(
+        framer: &mut Framer<'_, EmptyRng, crate::Server>,
+        stream: &mut ScriptedStream,
+    ) -> usize {
+        let mut frame_buf = vec![0; 200];
+        match framer.read(stream, &mut frame_buf).unwrap() {
+            ReadResult::Text(text) => text.len(),
+            _ => panic!("expected text"),
+        }
+    }
+
+    #[test]
+    fn ping_that_does_not_fit_beside_the_message_is_answered() {
+        let mut read_buf = vec![0; 1024];
+        let mut write_buf = vec![0; 1024];
+        let mut state = FramerState::new();
+        let mut ws_server = open_server();
+        let mut stream = ScriptedStream::new();
+        stream.chunks.push_back(full_message_around(client_frame(
+            b"ping-ping",
+            WebSocketOpCode::Ping,
+            true,
+        )));
+        let mut framer = Framer::new(&mut read_buf, &mut state, &mut write_buf, &mut ws_server);
+        assert_eq!(read_full_message(&mut framer, &mut stream), 200);
+        assert_eq!(
+            frames(&stream.written),
+            [(0xA, true, b"ping-ping".to_vec())]
+        );
+    }
+
+    #[test]
+    fn pong_that_does_not_fit_beside_the_message_is_only_awaited() {
+        let mut read_buf = vec![0; 1024];
+        let mut write_buf = vec![0; 1024];
+        let mut state = FramerState::new();
+        let mut ws_server = open_server();
+        let mut stream = ScriptedStream::new();
+        stream.chunks.push_back(full_message_around(client_frame(
+            &1u32.to_be_bytes(),
+            WebSocketOpCode::Pong,
+            true,
+        )));
+        let mut framer = Framer::new(&mut read_buf, &mut state, &mut write_buf, &mut ws_server);
+        framer.ping(&mut stream).unwrap();
+        assert_eq!(read_full_message(&mut framer, &mut stream), 200);
+        assert!(!state.awaiting_pong());
+        assert_eq!(state.control_frames(), 2);
+    }
+
+    #[test]
+    fn close_that_does_not_fit_beside_the_message_is_returned() {
+        let mut read_buf = vec![0; 1024];
+        let mut write_buf = vec![0; 1024];
+        let mut frame_buf = vec![0; 200];
+        let mut state = FramerState::new();
+        let mut ws_server = open_server();
+        let mut stream = ScriptedStream::new();
+        stream.chunks.push_back(full_message_around(client_frame(
+            &close_payload(1000, "bye"),
+            WebSocketOpCode::ConnectionClose,
+            true,
+        )));
+        let mut framer = Framer::new(&mut read_buf, &mut state, &mut write_buf, &mut ws_server);
+        assert!(matches!(
+            framer.read(&mut stream, &mut frame_buf).unwrap(),
+            ReadResult::Closed {
+                status: WebSocketCloseStatusCode::NormalClosure,
+                reason: "bye"
+            }
+        ));
+        assert_eq!(
+            frames(&stream.written),
+            [(0x8, true, close_payload(1000, "bye"))]
         );
     }
 

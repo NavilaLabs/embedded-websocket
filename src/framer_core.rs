@@ -18,6 +18,10 @@ pub enum ReadResult<'a> {
     /// A text message.
     Text(&'a str),
     /// A pong message with its payload.
+    ///
+    /// A pong that arrives between the fragments of a message and does not fit into the frame
+    /// buffer beside the fragments read so far is not returned. [`FramerState::awaiting_pong`]
+    /// still sees it.
     Pong(&'a [u8]),
     /// The close handshake is complete. Holds the status code and reason the other party sent,
     /// or [`WebSocketCloseStatusCode::Empty`] and an empty reason if it sent none.
@@ -620,8 +624,14 @@ where
                     return self.need_more_data();
                 }
                 Ok(Some(len)) if self.state.frame_cursor + len.payload > frame_buf.len() => {
-                    if mode == ReadMode::WholeMessages || self.state.frame_cursor == 0 {
+                    if self.state.frame_cursor == 0 {
                         return Err(FramerError::FrameTooLarge(frame_buf.len()));
+                    }
+                    if mode == ReadMode::WholeMessages {
+                        match self.decode_control_frame_aside(frame_buf)? {
+                            Some(decoded) => return Ok(decoded),
+                            None => continue,
+                        }
                     }
                     // the control frame payload fits once the message bytes before it are returned
                     match self.take_chunk(frame_buf)? {
@@ -679,40 +689,85 @@ where
                         }));
                     }
                 }
-                WebSocketReceiveMessageType::CloseMustReply => {
-                    self.state.chunks = None;
-                    let len = self.encode_write(
-                        WebSocketSendMessageType::CloseReply,
-                        true,
-                        &frame_buf[payload.clone()],
-                    )?;
-                    self.state.pending = Some(Pending::Message(Message::Closed(payload)));
-                    return Ok(Decoded::SendThenFinish(len));
+                close @ (WebSocketReceiveMessageType::CloseMustReply
+                | WebSocketReceiveMessageType::CloseCompleted) => {
+                    return self.decode_close(close, frame_buf, payload);
                 }
-                WebSocketReceiveMessageType::CloseCompleted => {
-                    self.state.chunks = None;
-                    return Ok(Decoded::Message(Message::Closed(payload)));
-                }
-                WebSocketReceiveMessageType::Ping => {
-                    self.state.control_frames = self.state.control_frames.saturating_add(1);
-                    let len = self.encode_write(
-                        WebSocketSendMessageType::Pong,
-                        true,
-                        &frame_buf[payload],
-                    )?;
-                    return Ok(Decoded::SendThenContinue(len));
-                }
+                WebSocketReceiveMessageType::Ping => return self.answer_ping(&frame_buf[payload]),
                 WebSocketReceiveMessageType::Pong => {
-                    self.state.control_frames = self.state.control_frames.saturating_add(1);
-                    let number = frame_buf[payload.clone()]
-                        .try_into()
-                        .map(u32::from_be_bytes);
-                    if number.ok() == self.state.awaited_pong {
-                        self.state.awaited_pong = None;
-                    }
+                    self.receive_pong(&frame_buf[payload.clone()]);
                     return Ok(Decoded::Message(Message::Pong(payload)));
                 }
             }
+        }
+    }
+
+    // Decodes a control frame whose payload does not fit behind the message bytes in `frame_buf`,
+    // which must stay for the rest of the message (RFC 6455 section 5.4). Returns `None` for a
+    // pong, which is therefore not returned.
+    fn decode_control_frame_aside<E>(
+        &mut self,
+        frame_buf: &mut [u8],
+    ) -> Result<Option<Decoded>, FramerError<E>> {
+        let mut payload = [0; MAX_CONTROL_FRAME_PAYLOAD_LEN];
+        let ws_result = self
+            .websocket
+            .read(&self.read_buf[..self.state.read_cursor], &mut payload)
+            .map_err(FramerError::WebSocket)?;
+        self.consume(ws_result.len_from);
+        let payload = &payload[..ws_result.len_to];
+        match ws_result.message_type {
+            WebSocketReceiveMessageType::Ping => Ok(Some(self.answer_ping(payload)?)),
+            WebSocketReceiveMessageType::Pong => {
+                self.receive_pong(payload);
+                Ok(None)
+            }
+            close @ (WebSocketReceiveMessageType::CloseMustReply
+            | WebSocketReceiveMessageType::CloseCompleted) => {
+                // the message stays unfinished, so its bytes make room for the close payload
+                frame_buf[..payload.len()].copy_from_slice(payload);
+                Ok(Some(self.decode_close(
+                    close,
+                    frame_buf,
+                    0..payload.len(),
+                )?))
+            }
+            WebSocketReceiveMessageType::Binary | WebSocketReceiveMessageType::Text => {
+                Err(FramerError::WebSocket(crate::Error::Unknown))
+            }
+        }
+    }
+
+    fn decode_close<E>(
+        &mut self,
+        close: WebSocketReceiveMessageType,
+        frame_buf: &[u8],
+        payload: Range<usize>,
+    ) -> Result<Decoded, FramerError<E>> {
+        self.state.chunks = None;
+        if close == WebSocketReceiveMessageType::CloseCompleted {
+            return Ok(Decoded::Message(Message::Closed(payload)));
+        }
+        let len = self.encode_write(
+            WebSocketSendMessageType::CloseReply,
+            true,
+            &frame_buf[payload.clone()],
+        )?;
+        self.state.pending = Some(Pending::Message(Message::Closed(payload)));
+        Ok(Decoded::SendThenFinish(len))
+    }
+
+    fn answer_ping<E>(&mut self, payload: &[u8]) -> Result<Decoded, FramerError<E>> {
+        self.state.control_frames = self.state.control_frames.saturating_add(1);
+        let len = self.encode_write(WebSocketSendMessageType::Pong, true, payload)?;
+        Ok(Decoded::SendThenContinue(len))
+    }
+
+    fn receive_pong(&mut self, payload: &[u8]) {
+        self.state.control_frames = self.state.control_frames.saturating_add(1);
+        let number = payload.try_into().map(u32::from_be_bytes);
+        if number.ok() == self.state.awaited_pong {
+            self.state.awaited_pong = None;
         }
     }
 
