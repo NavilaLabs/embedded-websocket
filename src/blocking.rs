@@ -235,7 +235,8 @@ where
 
     /// Initiates a close handshake.
     ///
-    /// Has no effect if the other party already closed the websocket.
+    /// If the other party already closed the websocket, the framer has answered its close frame
+    /// while reading, and this fails with [`Error::WebSocketNotOpen`] without sending anything.
     ///
     /// # Errors
     ///
@@ -245,6 +246,7 @@ where
     ///   section 7.4).
     ///
     /// [`Error::InvalidCloseStatusCode`]: crate::Error::InvalidCloseStatusCode
+    /// [`Error::WebSocketNotOpen`]: crate::Error::WebSocketNotOpen
     pub fn close<S>(
         &mut self,
         stream: &mut S,
@@ -845,6 +847,29 @@ mod tests {
             stream.written,
             [&[0x88, 0x05][..], &close_payload(4000, "bye")].concat()
         );
+    }
+
+    #[test]
+    fn close_after_the_other_party_closed_fails() {
+        let mut read_buf = vec![0; 1024];
+        let mut write_buf = vec![0; 1024];
+        let mut frame_buf = vec![0; 1024];
+        let mut state = FramerState::new();
+        let mut ws_server = open_server();
+        let mut stream = ScriptedStream::new();
+        stream.chunks.push_back(client_frame(
+            &close_payload(1000, ""),
+            WebSocketOpCode::ConnectionClose,
+            true,
+        ));
+        let mut framer = Framer::new(&mut read_buf, &mut state, &mut write_buf, &mut ws_server);
+        framer.read(&mut stream, &mut frame_buf).unwrap();
+        let written = stream.written.len();
+        assert!(matches!(
+            framer.close(&mut stream, WebSocketCloseStatusCode::NormalClosure, None),
+            Err(FramerError::WebSocket(crate::Error::WebSocketNotOpen))
+        ));
+        assert_eq!(stream.written.len(), written);
     }
 
     #[test]

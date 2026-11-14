@@ -291,7 +291,8 @@ where
 
     /// Initiates a close handshake.
     ///
-    /// Has no effect if the other party already closed the websocket.
+    /// If the other party already closed the websocket, the framer has answered its close frame
+    /// while reading, and this fails with [`Error::WebSocketNotOpen`] without sending anything.
     ///
     /// # Errors
     ///
@@ -301,6 +302,7 @@ where
     ///   section 7.4).
     ///
     /// [`Error::InvalidCloseStatusCode`]: crate::Error::InvalidCloseStatusCode
+    /// [`Error::WebSocketNotOpen`]: crate::Error::WebSocketNotOpen
     pub async fn close<S>(
         &mut self,
         stream: &mut S,
