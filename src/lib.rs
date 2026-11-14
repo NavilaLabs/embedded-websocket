@@ -1283,29 +1283,17 @@ fn read_length(byte2: u8, from_buffer: &[u8]) -> Result<(usize, usize)> {
     Err(Error::InvalidFrameLength)
 }
 
-fn decode_close_frame(buffer: &mut [u8], num_bytes_read: usize, len: usize) -> WebSocketFrame {
-    if len >= 2 {
-        let code = u16::from_be_bytes([buffer[0], buffer[1]]);
-        let close_status_code = WebSocketCloseStatusCode::from_u16(code);
-
-        return WebSocketFrame {
-            num_bytes_from: num_bytes_read,
-            num_bytes_to: len,
-            op_code: WebSocketOpCode::ConnectionClose,
-            close_status: Some(close_status_code),
-            is_fin_bit_set: true,
-        };
-    }
-
-    build_client_disconnected_frame(num_bytes_read)
-}
-
-fn build_client_disconnected_frame(num_bytes_from: usize) -> WebSocketFrame {
+fn decode_close_frame(buffer: &[u8], num_bytes_read: usize, len: usize) -> WebSocketFrame {
+    let close_status = match buffer[..len] {
+        [high, low, ..] => WebSocketCloseStatusCode::from_u16(u16::from_be_bytes([high, low])),
+        // RFC 6455 section 7.1.5
+        _ => WebSocketCloseStatusCode::Empty,
+    };
     WebSocketFrame {
-        num_bytes_from,
-        num_bytes_to: 0,
+        num_bytes_from: num_bytes_read,
+        num_bytes_to: len,
         op_code: WebSocketOpCode::ConnectionClose,
-        close_status: Some(WebSocketCloseStatusCode::InternalServerError),
+        close_status: Some(close_status),
         is_fin_bit_set: true,
     }
 }
@@ -1468,6 +1456,13 @@ mod tests {
         ] {
             assert_eq!(read_frames(frame, 1).err(), expected, "{frame:x?}");
         }
+    }
+
+    #[test]
+    fn close_frame_without_status_code_reports_no_status() {
+        let close = read_frames(&[0x88, 0x00], 1).unwrap();
+        assert_eq!(close.close_status, Some(WebSocketCloseStatusCode::Empty));
+        assert_eq!(close.len_to, 0);
     }
 
     #[test]
