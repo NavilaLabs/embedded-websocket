@@ -30,7 +30,7 @@ fn main() -> Result<(), FramerError<impl Error>> {
     let websocket_options = WebSocketOptions {
         path: "/chat",
         host: "localhost",
-        origin: "http://localhost:1337",
+        origin: Some("http://localhost:1337"),
         sub_protocols: None,
         additional_headers: None,
     };

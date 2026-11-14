@@ -21,7 +21,7 @@ fn main() -> ! {
         let options = WebSocketOptions {
             path: black_box("/"),
             host: black_box("host"),
-            origin: black_box("origin"),
+            origin: Some(black_box("origin")),
             sub_protocols: None,
             additional_headers: None,
         };

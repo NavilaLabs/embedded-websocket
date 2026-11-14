@@ -129,7 +129,7 @@ pub async fn wss_echo<'b, S: Read + Write>(
     let options = WebSocketOptions {
         path: target.path,
         host: target.host,
-        origin: target.host,
+        origin: None,
         sub_protocols: None,
         additional_headers: None,
     };

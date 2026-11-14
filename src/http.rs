@@ -82,13 +82,19 @@ pub(crate) fn build_connect_handshake_request(
     let sec_websocket_key: String<24> = String::try_from(str::from_utf8(&key_as_base64)?)?;
 
     http_request.push("GET ")?;
+    // RFC 6455 section 3: an empty path is sent as "/", also before a query
+    if !websocket_options.path.starts_with('/') {
+        http_request.push("/")?;
+    }
     http_request.push(websocket_options.path)?;
     http_request.push(" HTTP/1.1\r\nHost: ")?;
     http_request.push(websocket_options.host)?;
     http_request.push("\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: ")?;
     http_request.push(sec_websocket_key.as_str())?;
-    http_request.push("\r\nOrigin: ")?;
-    http_request.push(websocket_options.origin)?;
+    if let Some(origin) = websocket_options.origin {
+        http_request.push("\r\nOrigin: ")?;
+        http_request.push(origin)?;
+    }
 
     // turn sub protocol list into a CSV list
     if let Some(sub_protocols) = websocket_options.sub_protocols {
@@ -191,7 +197,7 @@ mod tests {
         let options = WebSocketOptions {
             path: "/chat",
             host: "localhost",
-            origin: "http://localhost",
+            origin: Some("http://localhost"),
             sub_protocols: None,
             additional_headers: None,
         };

@@ -5,7 +5,7 @@ set -euo pipefail
 cd "$(dirname "$0")"
 seconds="${1:-60}"
 toolchain="${FUZZ_TOOLCHAIN:-nightly}"
-for target in head request response frame framer; do
+for target in head request response frame url framer; do
     mkdir -p "corpus/$target"
     cargo "+$toolchain" fuzz run "$target" "corpus/$target" "seeds/$target" -- \
         -max_total_time="$seconds" -dict=http.dict

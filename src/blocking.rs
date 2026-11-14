@@ -48,7 +48,7 @@ use crate::{
 ///     let websocket_options = WebSocketOptions {
 ///         path: "/chat",
 ///         host: "localhost",
-///         origin: "http://localhost",
+///         origin: Some("http://localhost"),
 ///         sub_protocols: None,
 ///         additional_headers: None,
 ///     };
@@ -580,7 +580,7 @@ mod tests {
         WebSocketOptions {
             path: "/chat",
             host: "localhost",
-            origin: "http://localhost",
+            origin: Some("http://localhost"),
             sub_protocols: None,
             additional_headers: None,
         }

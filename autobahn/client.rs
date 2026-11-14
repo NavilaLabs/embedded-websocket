@@ -79,7 +79,7 @@ impl Buffers {
         let websocket_options = WebSocketOptions {
             path,
             host: ADDRESS,
-            origin: "http://127.0.0.1",
+            origin: Some("http://127.0.0.1"),
             sub_protocols: None,
             additional_headers: None,
         };

@@ -34,7 +34,7 @@
 //!     let options = WebSocketOptions {
 //!         path: "/chat",
 //!         host: "localhost",
-//!         origin: "http://localhost",
+//!         origin: Some("http://localhost"),
 //!         sub_protocols: None,
 //!         additional_headers: None,
 //!     };
@@ -77,11 +77,13 @@ pub mod blocking;
 mod framer_core;
 mod head;
 mod request;
+mod url;
 pub use self::framer_core::{
     FramerError, FramerState, ReadChunk, ReadResult, MIN_FRAME_BUF_LEN, MIN_READ_BUF_LEN,
     MIN_WRITE_BUF_LEN,
 };
 pub use self::request::{Decision, Request};
+pub use self::url::WebSocketUrl;
 
 /// Entry points for the fuzz targets in `fuzz/`; not part of the API.
 #[cfg(fuzzing)]
@@ -314,6 +316,8 @@ pub enum Error {
     UnexpectedDataFrame,
     /// A message is written while the message of a failed write is not finished yet
     UnfinishedWrite,
+    /// A URL is not a valid `ws://` or `wss://` URL, see [`WebSocketUrl::parse`]
+    InvalidUrl,
     /// The request is not a websocket upgrade. The first bytes of the output, as many as this
     /// holds, are the `400 Bad Request` or `426 Upgrade Required` response to send before closing
     /// the connection
@@ -407,17 +411,16 @@ pub struct WebSocketReadResult {
 /// websocket server
 pub struct WebSocketOptions<'a> {
     /// The request uri (e.g. `/chat?id=123`) of the GET method used to identify the endpoint of the
-    /// websocket connection. This allows multiple domains to be served by a single server.
-    /// This could also be used to send identifiable information about the client
+    /// websocket connection. A path that does not start with `/` is sent with a `/` in front.
     pub path: &'a str,
-    /// The hostname (e.g. `server.example.com`) is used so that both the client and the server
-    /// can verify that they agree on which host is in use
+    /// The value of the `Host` header: the host name (e.g. `server.example.com`), followed by
+    /// `:` and the port unless it is the default port of the scheme
     pub host: &'a str,
     /// The origin (e.g. `http://example.com`) is used to protect against unauthorized
     /// cross-origin use of a WebSocket server by scripts using the WebSocket API in a web
-    /// browser. This field is usually only set by browser clients but servers may require it
-    /// so it has been exposed here.
-    pub origin: &'a str,
+    /// browser. Clients other than browsers may leave it out (`None`), but some servers require
+    /// it.
+    pub origin: Option<&'a str>,
     /// A list of requested sub protocols in order of preference. The server should return the
     /// first sub protocol it supports or none at all. A sub protocol can be anything agreed
     /// between the server and client
@@ -595,7 +598,7 @@ where
     /// let websocket_options = ws::WebSocketOptions {
     ///     path: "/chat",
     ///     host: "localhost",
-    ///     origin: "http://localhost",
+    ///     origin: Some("http://localhost"),
     ///     sub_protocols: Some(&sub_protocols),
     ///     additional_headers: None,
     /// };

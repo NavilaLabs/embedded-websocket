@@ -117,7 +117,7 @@ fn client_request_larger_than_a_kilobyte_fits_a_large_buffer() {
     let options = WebSocketOptions {
         path: "/chat",
         host: "localhost",
-        origin: "http://localhost",
+        origin: Some("http://localhost"),
         sub_protocols: None,
         additional_headers: Some(&headers),
     };
@@ -171,7 +171,7 @@ fn framer_connect_returns_the_chosen_offer() {
     let options = WebSocketOptions {
         path: "/chat",
         host: "localhost",
-        origin: "http://localhost",
+        origin: Some("http://localhost"),
         sub_protocols: Some(&offers),
         additional_headers: None,
     };

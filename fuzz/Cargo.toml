@@ -12,6 +12,7 @@ libfuzzer-sys = "0.4.10"
 base64 = "0.23.1"
 embedded-io = { version = "0.7.1", features = ["std"] }
 embedded-io-websocket = { path = ".." }
+url = "2.5.8"
 
 # not part of the workspace of the library
 [workspace]
@@ -40,6 +41,13 @@ bench = false
 [[bin]]
 name = "frame"
 path = "fuzz_targets/frame.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "url"
+path = "fuzz_targets/url.rs"
 test = false
 doc = false
 bench = false
