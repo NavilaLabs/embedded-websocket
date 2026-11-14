@@ -61,12 +61,13 @@ impl<'a> Request<'a> {
     }
 
     /// Whether the client offered the sub protocol `protocol` in `Sec-WebSocket-Protocol`.
+    ///
+    /// Offers that are not HTTP tokens are ignored, because a server must answer with a token
+    /// (RFC 6455 section 4.2.2).
     pub fn offers(&self, protocol: &str) -> bool {
-        self.offered().any(|offered| offered == protocol)
-    }
-
-    pub(crate) fn offered(&self) -> impl Iterator<Item = &'a str> {
-        self.head.tokens("sec-websocket-protocol")
+        self.head
+            .tokens("sec-websocket-protocol")
+            .any(|offered| offered == protocol && offered.bytes().all(is_token_byte))
     }
 
     /// Checks that this is a websocket upgrade request and returns its key, or the response that
@@ -124,6 +125,17 @@ mod tests {
              Sec-WebSocket-Version: 13\r\nSec-WebSocket-Key: {key}\r\n\r\n"
         );
         Request::parse(head.as_bytes()).unwrap().upgrade_key()
+    }
+
+    #[test]
+    fn offered_sub_protocols_that_are_not_tokens_cannot_be_chosen() {
+        let head = "GET / HTTP/1.1\r\nSec-WebSocket-Protocol: a b, chat, x\"y\r\n\
+                    Sec-WebSocket-Protocol: v2;q, v2.json\r\n\r\n";
+        let request = Request::parse(head.as_bytes()).unwrap();
+        assert!(request.offers("chat") && request.offers("v2.json"));
+        for protocol in ["a b", "x\"y", "v2;q", ""] {
+            assert!(!request.offers(protocol), "{protocol}");
+        }
     }
 
     #[test]
