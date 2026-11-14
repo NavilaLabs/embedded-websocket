@@ -180,7 +180,7 @@ fn is_resource_byte(byte: u8) -> bool {
         )
 }
 
-fn is_percent_encoding_valid(resource: &str) -> bool {
+pub(crate) fn is_percent_encoding_valid(resource: &str) -> bool {
     let bytes = resource.as_bytes();
     bytes.iter().enumerate().all(|(index, &byte)| {
         byte != b'%'

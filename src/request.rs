@@ -1,9 +1,10 @@
-use core::str;
+use core::{net::Ipv6Addr, str};
 
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 
 use crate::{
     head::{self, is_token_byte, Head},
+    url::is_percent_encoding_valid,
     Error, Result, WebSocketKey,
 };
 
@@ -28,8 +29,9 @@ impl<'a> Request<'a> {
     /// # Errors
     ///
     /// * [`Error::HttpHeaderIncomplete`] if `from` does not hold the whole head yet.
-    /// * [`Error::HttpHeaderInvalid`] if the head is not a valid HTTP/1.1 request. Answer it
-    ///   with `400 Bad Request` and close the connection.
+    /// * [`Error::HttpHeaderInvalid`] if the head is not a valid HTTP/1.1 request, also if it
+    ///   does not have exactly one valid `Host` header (RFC 9112 section 3.2). Answer it with
+    ///   `400 Bad Request` and close the connection.
     pub fn read(from: &'a [u8]) -> Result<(Self, usize)> {
         let len = head::head_len(from, &mut 0).ok_or(Error::HttpHeaderIncomplete)?;
         Ok((Self::parse(&from[..len])?, len))
@@ -43,6 +45,7 @@ impl<'a> Request<'a> {
             || !method.bytes().all(is_token_byte)
             || path.is_empty()
             || version != "HTTP/1.1"
+            || !has_one_valid_host(&head)
         {
             return Err(Error::HttpHeaderInvalid);
         }
@@ -90,6 +93,43 @@ impl<'a> Request<'a> {
     }
 }
 
+// RFC 9112 section 3.2: a server must reject a request without exactly one valid Host field
+fn has_one_valid_host(head: &Head<'_>) -> bool {
+    let mut hosts = head
+        .fields()
+        .filter(|(name, _)| name.eq_ignore_ascii_case("host"));
+    match (hosts.next(), hosts.next()) {
+        (Some((_, value)), None) => str::from_utf8(value).is_ok_and(is_valid_host),
+        _ => false,
+    }
+}
+
+// uri-host [ ":" port ] of RFC 3986 section 3.2.2 and 3.2.3
+fn is_valid_host(host: &str) -> bool {
+    let (is_valid_name, port) = match host.strip_prefix('[') {
+        Some(rest) => match rest.split_once(']') {
+            Some((address, port)) => (address.parse::<Ipv6Addr>().is_ok(), port),
+            None => return false,
+        },
+        None => {
+            let (name, port) = host.split_at(host.find(':').unwrap_or(host.len()));
+            let is_valid_name =
+                name.bytes().all(is_reg_name_byte) && is_percent_encoding_valid(name);
+            (is_valid_name, port)
+        }
+    };
+    let is_valid_port = port.is_empty()
+        || port
+            .strip_prefix(':')
+            .is_some_and(|digits| digits.bytes().all(|byte| byte.is_ascii_digit()));
+    is_valid_name && is_valid_port
+}
+
+// unreserved, pct-encoded and sub-delims of RFC 3986 section 3.2.2
+fn is_reg_name_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || b"-._~%!$&'()*+,;=".contains(&byte)
+}
+
 fn is_sixteen_base64_encoded_bytes(key: &str) -> bool {
     // two bytes more than a valid key needs, so a longer key does not fit
     let mut decoded = [0; 18];
@@ -121,7 +161,7 @@ mod tests {
 
     fn upgrade_key_of(key: &str) -> core::result::Result<WebSocketKey, &'static [u8]> {
         let head = format!(
-            "GET / HTTP/1.1\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\
+            "GET / HTTP/1.1\r\nHost: a\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\
              Sec-WebSocket-Version: 13\r\nSec-WebSocket-Key: {key}\r\n\r\n"
         );
         Request::parse(head.as_bytes()).unwrap().upgrade_key()
@@ -129,12 +169,58 @@ mod tests {
 
     #[test]
     fn offered_sub_protocols_that_are_not_tokens_cannot_be_chosen() {
-        let head = "GET / HTTP/1.1\r\nSec-WebSocket-Protocol: a b, chat, x\"y\r\n\
+        let head = "GET / HTTP/1.1\r\nHost: a\r\nSec-WebSocket-Protocol: a b, chat, x\"y\r\n\
                     Sec-WebSocket-Protocol: v2;q, v2.json\r\n\r\n";
         let request = Request::parse(head.as_bytes()).unwrap();
         assert!(request.offers("chat") && request.offers("v2.json"));
         for protocol in ["a b", "x\"y", "v2;q", ""] {
             assert!(!request.offers(protocol), "{protocol}");
+        }
+    }
+
+    fn request_with_hosts(hosts: &str) -> Result<Request<'static>> {
+        let head = format!("GET / HTTP/1.1\r\n{hosts}\r\n");
+        Request::parse(std::string::String::leak(head).as_bytes())
+    }
+
+    // RFC 9112 section 3.2
+    #[test]
+    fn request_with_one_valid_host_is_accepted() {
+        for host in [
+            "Host: example.com\r\n",
+            "Host: example.com:8080\r\n",
+            "Host: 192.168.1.10:80\r\n",
+            "Host: [::1]:443\r\n",
+            "Host: [::1]\r\n",
+            "Host: my-host_1.%41~!$&'()*+,;=\r\n",
+            "Host: example.com:\r\n",
+            "Host:\r\n",
+        ] {
+            assert!(request_with_hosts(host).is_ok(), "{host}");
+        }
+    }
+
+    #[test]
+    fn request_without_exactly_one_valid_host_is_rejected() {
+        for hosts in [
+            "",
+            "Host: a\r\nHost: a\r\n",
+            "Host: a b\r\n",
+            "Host: a/b\r\n",
+            "Host: a@b\r\n",
+            "Host: a:b\r\n",
+            "Host: a:80:80\r\n",
+            "Host: %4\r\n",
+            "Host: [::1\r\n",
+            "Host: [not-ipv6]\r\n",
+            "Host: [::1]80\r\n",
+            "Host: ä\r\n",
+        ] {
+            assert_eq!(
+                request_with_hosts(hosts).err(),
+                Some(Error::HttpHeaderInvalid),
+                "{hosts:?}"
+            );
         }
     }
 
