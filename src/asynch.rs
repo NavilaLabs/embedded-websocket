@@ -219,7 +219,7 @@ where
         send_unsent(&mut self.core, stream).await?;
         let mut searched = 0;
         let head_len = loop {
-            if let Some(len) = self.core.head_len(&mut searched) {
+            if let Some(len) = self.core.request_head_len(&mut searched) {
                 break len;
             }
             let received_size = stream

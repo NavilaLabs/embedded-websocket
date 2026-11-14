@@ -167,7 +167,7 @@ where
         self.send_unsent(stream)?;
         let mut searched = 0;
         let head_len = loop {
-            if let Some(len) = self.core.head_len(&mut searched) {
+            if let Some(len) = self.core.request_head_len(&mut searched) {
                 break len;
             }
             let received_size = stream
@@ -757,6 +757,17 @@ mod tests {
         assert!(written.starts_with("HTTP/1.1 101 Switching Protocols\r\n"));
         assert!(written.contains("\r\nSec-WebSocket-Protocol: superchat\r\n"));
         assert!(written.contains("\r\nSec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\r\n"));
+        assert!(matches!(next, Some(ReadResult::Text("hi"))));
+    }
+
+    // RFC 9112 section 2.2: a server should ignore empty lines before the request line
+    #[test]
+    fn accept_ignores_empty_lines_before_the_request() {
+        let mut request = b"\r\n\r\n\r\n".to_vec();
+        request.extend(UPGRADE_REQUEST.as_bytes());
+        request.extend(client_frame(b"hi", WebSocketOpCode::TextFrame, true));
+        let (accepted, _, next) = accept(&request, |_| Decision::Accept { sub_protocol: None });
+        assert!(accepted.unwrap());
         assert!(matches!(next, Some(ReadResult::Text("hi"))));
     }
 

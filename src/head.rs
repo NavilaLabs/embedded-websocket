@@ -18,6 +18,25 @@ pub(crate) fn head_len(buf: &[u8], searched: &mut usize) -> Option<usize> {
         .map(|position| start + position + END.len())
 }
 
+/// Like [`head_len`] for a request, which may follow empty lines that are part of the returned
+/// length (RFC 9112 section 2.2).
+pub(crate) fn request_head_len(buf: &[u8], searched: &mut usize) -> Option<usize> {
+    let empty_lines_len = empty_lines_len(buf);
+    let mut searched_after = searched.saturating_sub(empty_lines_len);
+    let len = head_len(&buf[empty_lines_len..], &mut searched_after);
+    *searched = empty_lines_len + searched_after;
+    len.map(|len| empty_lines_len + len)
+}
+
+/// The length of the empty lines at the start of `bytes`.
+pub(crate) fn empty_lines_len(bytes: &[u8]) -> usize {
+    bytes
+        .chunks_exact(2)
+        .take_while(|line| *line == b"\r\n")
+        .count()
+        * 2
+}
+
 /// A complete and validated HTTP/1.1 message head (RFC 9112 section 2.1).
 pub(crate) struct Head<'a> {
     start_line: &'a [u8],
@@ -159,6 +178,17 @@ mod tests {
         }
         assert_eq!(head_len(&head[..27], &mut searched), Some(27));
         assert_eq!(head_len(head, &mut 0), Some(27));
+    }
+
+    #[test]
+    fn request_head_len_skips_empty_lines_across_calls() {
+        let head = b"\r\n\r\nGET / HTTP/1.1\r\nHost: a\r\n\r\nframes";
+        let mut searched = 0;
+        for len in 0..30 {
+            assert_eq!(request_head_len(&head[..len], &mut searched), None, "{len}");
+        }
+        assert_eq!(request_head_len(&head[..31], &mut searched), Some(31));
+        assert_eq!(request_head_len(head, &mut 0), Some(31));
     }
 
     #[test]

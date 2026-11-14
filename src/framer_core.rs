@@ -361,6 +361,10 @@ impl<'a, TRng> FramerCore<'a, TRng, crate::Server>
 where
     TRng: Rng,
 {
+    pub(crate) fn request_head_len(&self, searched: &mut usize) -> Option<usize> {
+        head::request_head_len(&self.read_buf[..self.state.read_cursor], searched)
+    }
+
     pub(crate) fn answer_request<'d, E>(
         &mut self,
         head_len: usize,

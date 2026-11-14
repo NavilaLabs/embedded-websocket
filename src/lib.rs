@@ -96,6 +96,11 @@ pub mod fuzzing {
         crate::head::head_len(buf, searched)
     }
 
+    /// See `head::request_head_len`.
+    pub fn request_head_len(buf: &[u8], searched: &mut usize) -> Option<usize> {
+        crate::head::request_head_len(buf, searched)
+    }
+
     /// See `Request::parse`.
     pub fn parse_request(head: &[u8]) -> Result<Request<'_>> {
         Request::parse(head)

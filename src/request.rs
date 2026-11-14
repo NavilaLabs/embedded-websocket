@@ -33,13 +33,14 @@ impl<'a> Request<'a> {
     ///   does not have exactly one valid `Host` header (RFC 9112 section 3.2). Answer it with
     ///   `400 Bad Request` and close the connection.
     pub fn read(from: &'a [u8]) -> Result<(Self, usize)> {
-        let len = head::head_len(from, &mut 0).ok_or(Error::HttpHeaderIncomplete)?;
+        let len = head::request_head_len(from, &mut 0).ok_or(Error::HttpHeaderIncomplete)?;
         Ok((Self::parse(&from[..len])?, len))
     }
 
-    /// Parses a complete request head that ends with the empty line.
+    /// Parses a complete request head that ends with the empty line and may start with empty
+    /// lines.
     pub(crate) fn parse(head: &'a [u8]) -> Result<Self> {
-        let head = Head::parse(head)?;
+        let head = Head::parse(&head[head::empty_lines_len(head)..])?;
         let (method, path, version) = head.start_line().ok_or(Error::HttpHeaderInvalid)?;
         if method.is_empty()
             || !method.bytes().all(is_token_byte)
@@ -192,6 +193,22 @@ mod tests {
         for protocol in ["a b", "x\"y", "v2;q", ""] {
             assert!(!request.offers(protocol), "{protocol}");
         }
+    }
+
+    // RFC 9112 section 2.2
+    #[test]
+    fn empty_lines_before_the_request_line_are_ignored() {
+        let input = b"\r\n\r\nGET /chat HTTP/1.1\r\nHost: a\r\n\r\nframes";
+        let (request, len) = Request::read(input).unwrap();
+        assert_eq!((request.path(), len), ("/chat", input.len() - 6));
+        assert_eq!(
+            Request::read(b"\r\n\r\n").err(),
+            Some(Error::HttpHeaderIncomplete)
+        );
+        assert_eq!(
+            Request::read(b"\nGET / HTTP/1.1\r\nHost: a\r\n\r\n").err(),
+            Some(Error::HttpHeaderInvalid)
+        );
     }
 
     // RFC 9112 section 3.2: the request target has no whitespace, controls or obs-text
