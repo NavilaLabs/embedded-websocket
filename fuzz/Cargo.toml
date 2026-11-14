@@ -13,6 +13,7 @@ base64 = "0.23.1"
 embedded-io = { version = "0.7.1", features = ["std"] }
 embedded-io-websocket = { path = ".." }
 url = "2.5.8"
+rand_core = { version = "0.10.1", default-features = false }
 
 # not part of the workspace of the library
 [workspace]

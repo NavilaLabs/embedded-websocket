@@ -10,6 +10,7 @@ embedded-io-websocket = { path = "..", features = ["asynch"] }
 embedded-io = "0.7.1"
 embedded-io-async = "0.7.0"
 cortex-m-rt = "0.7.5"
+rand_core = { version = "0.10.1", default-features = false }
 
 # The probes are only measured, never run, and a sleeping loop would add code to the baseline.
 [lints.clippy]

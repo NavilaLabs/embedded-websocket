@@ -5,10 +5,10 @@
 use core::hint::black_box;
 
 use embedded_io_websocket::{
-    blocking::Framer, Decision, EmptyRng, FramerState, WebSocketClient, WebSocketCloseStatusCode,
+    blocking::Framer, Decision, FramerState, WebSocketClient, WebSocketCloseStatusCode,
     WebSocketOptions, WebSocketSendMessageType, WebSocketServer,
 };
-use size_probes::Stream;
+use size_probes::{Random, Stream};
 
 #[cortex_m_rt::entry]
 fn main() -> ! {
@@ -16,7 +16,7 @@ fn main() -> ! {
     let mut stream = Stream;
     loop {
         let mut state = FramerState::new();
-        let mut client = WebSocketClient::new_client(EmptyRng::new());
+        let mut client = WebSocketClient::new_client(Random);
         let mut framer = Framer::new(&mut read_buf, &mut state, &mut write_buf, &mut client);
         let options = WebSocketOptions {
             path: black_box("/"),

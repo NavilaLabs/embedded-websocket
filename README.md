@@ -34,6 +34,8 @@ Both have the same API:
 * `asynch::Reader` and `asynch::Writer` split a connection after the opening handshake, so one task reads while another writes. They share the write side through a lock: `LocalMutex` for tasks on one executor, or your own `Lock` implementation around a mutex such as `embassy_sync::mutex::Mutex`. The reader still answers pings, and the writer releases the lock between the frames of a long message.
 * A `read`, `read_chunk` or `write` that fails, or is cancelled in the async framer, can be called again to continue where it stopped. Call `write` again with the same message before writing another one.
 
+A client needs a cryptographically secure random number generator (`rand_core::CryptoRng`) for its masking keys, as RFC 6455 section 5.3 requires: for example `rand::rng()`, the hardware generator of the chip, or ChaCha seeded from it. A server needs none and uses `EmptyRng`.
+
 To use a `std` or `tokio` stream, wrap it with `FromStd` or `FromTokio` from [embedded-io-adapters](https://crates.io/crates/embedded-io-adapters).
 
 ### Buffers

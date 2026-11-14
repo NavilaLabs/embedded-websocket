@@ -2,10 +2,13 @@
 #![no_main]
 
 use embedded_io_websocket::{
-    EmptyRng, WebSocketClient, WebSocketReceiveMessageType, WebSocketSendMessageType,
-    WebSocketServer, WebSocketState,
+    WebSocketClient, WebSocketReceiveMessageType, WebSocketSendMessageType, WebSocketServer,
+    WebSocketState,
 };
 use libfuzzer_sys::fuzz_target;
+use zero_rng::ZeroRng;
+
+mod zero_rng;
 
 fn send_type(message_type: WebSocketReceiveMessageType) -> WebSocketSendMessageType {
     match message_type {
@@ -32,7 +35,7 @@ fuzz_target!(|input: (u8, &[u8])| {
         from = &from[result.len_from..];
     }
 
-    let mut ws_client = WebSocketClient::new_client(EmptyRng::new());
+    let mut ws_client = WebSocketClient::new_client(ZeroRng);
     ws_client.state = WebSocketState::Open;
     let mut payload = vec![0; frames.len()];
     if let Ok(result) = ws_client.read(frames, &mut payload) {

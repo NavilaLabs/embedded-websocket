@@ -5,17 +5,17 @@
 use core::hint::black_box;
 
 use embedded_io_websocket::{
-    EmptyRng, Request, WebSocketClient, WebSocketCloseStatusCode, WebSocketOptions,
-    WebSocketSendMessageType, WebSocketServer,
+    Request, WebSocketClient, WebSocketCloseStatusCode, WebSocketOptions, WebSocketSendMessageType,
+    WebSocketServer,
 };
-use size_probes as _;
+use size_probes::Random;
 
 #[cortex_m_rt::entry]
 fn main() -> ! {
     let (mut from, mut to) = ([0u8; 512], [0u8; 512]);
     loop {
         black_box(&mut from);
-        let mut client = WebSocketClient::new_client(EmptyRng::new());
+        let mut client = WebSocketClient::new_client(Random);
         let options = WebSocketOptions {
             path: black_box("/"),
             host: black_box("host"),

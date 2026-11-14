@@ -4,9 +4,8 @@ use rand_core::TryRng;
 
 /// A random number generator that always returns zero, for servers.
 ///
-/// Servers do not mask frames, so they need no random numbers. Clients must mask frames with a
-/// random key (RFC 6455 section 5.3), so use a real random number generator for them. It does not
-/// need to be cryptographically strong.
+/// Servers do not mask frames, so they need no random numbers. Clients cannot use it: they need a
+/// cryptographically secure generator, see [`WebSocket::new_client`](crate::WebSocket::new_client).
 #[derive(Default)]
 pub struct EmptyRng {}
 

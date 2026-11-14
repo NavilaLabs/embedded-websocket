@@ -18,7 +18,7 @@ use embedded_tls::{
     webpki::CertVerifier, Aes128GcmSha256, Certificate, TlsClock, TlsConfig, TlsConnection,
     TlsContext, TlsError,
 };
-use rand_core::Rng;
+use rand_core::CryptoRng;
 // a crate that is never named is not linked, and this one provides the software crypto drivers
 use embassy_crypto_rustcrypto as _;
 
@@ -104,7 +104,7 @@ pub async fn wss_echo<'b, S: Read + Write, Clock: TlsClock>(
     target: &WssTarget<'_>,
     tls_read: &mut [u8],
     tls_write: &mut [u8],
-    websocket_rng: impl Rng,
+    websocket_rng: impl CryptoRng,
     buffers: &'b mut Buffers,
     message: &str,
 ) -> Result<&'b str, Error> {

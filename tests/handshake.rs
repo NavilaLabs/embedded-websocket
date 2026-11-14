@@ -8,6 +8,27 @@ use embedded_io_websocket::{
 };
 
 const KEY: &str = "dGhlIHNhbXBsZSBub25jZQ==";
+
+// Gives the client the fixed key `AAAAAAAAAAAAAAAAAAAAAA==`. Only acceptable in a test: a real
+// client needs unpredictable masking keys.
+struct ZeroRng;
+
+impl rand::TryRng for ZeroRng {
+    type Error = std::convert::Infallible;
+
+    fn try_next_u32(&mut self) -> Result<u32, Self::Error> {
+        Ok(0)
+    }
+    fn try_next_u64(&mut self) -> Result<u64, Self::Error> {
+        Ok(0)
+    }
+    fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), Self::Error> {
+        dest.fill(0);
+        Ok(())
+    }
+}
+
+impl rand::TryCryptoRng for ZeroRng {}
 const ACCEPT: &str = "s3pPLMBiTxaQ9kYGzzhZRbK+xOo=";
 
 fn upgrade_request(sub_protocols: &str) -> String {
@@ -177,8 +198,8 @@ fn framer_connect_returns_the_chosen_offer() {
     };
     let (mut read_buf, mut write_buf) = (vec![0; 1024], vec![0; 1024]);
     let mut state = FramerState::new();
-    // the zero key of `EmptyRng` is answered by this accept string
-    let mut ws_client = WebSocketClient::new_client(embedded_io_websocket::EmptyRng::new());
+    // the zero key is answered by this accept string
+    let mut ws_client = WebSocketClient::new_client(ZeroRng);
     let mut framer = Framer::new(&mut read_buf, &mut state, &mut write_buf, &mut ws_client);
     let response = switching_protocols(&long).replace(ACCEPT, "ICX+Yqv66kxgM0FcWaLWlFLwTAI=");
     let mut stream = Replay {

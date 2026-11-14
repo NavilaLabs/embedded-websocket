@@ -63,7 +63,7 @@
 
 use core::{cmp, result, str};
 use heapless::{String, Vec};
-use rand_core::Rng;
+use rand_core::{CryptoRng, Rng};
 use sha1::{Digest, Sha1};
 
 mod http;
@@ -478,7 +478,13 @@ where
     T: Rng,
     Type: WebSocketType,
 {
-    /// Creates a new websocket client by passing in a required random number generator
+    /// Creates a new websocket client with the random number generator for its masking keys and
+    /// the key of its opening handshake.
+    ///
+    /// The generator must be cryptographically secure: RFC 6455 section 5.3 requires masking
+    /// keys that the application cannot predict, so that a script cannot make a proxy read its
+    /// frames as HTTP requests (section 10.3). Use a hardware random number generator, or a
+    /// generator such as ChaCha seeded from one.
     ///
     /// # Examples
     /// ```
@@ -488,7 +494,17 @@ where
     ///
     /// assert_eq!(ws::WebSocketState::None, ws_client.state);
     /// ```
-    pub fn new_client(rng: T) -> WebSocketClient<T> {
+    ///
+    /// A generator that is not cryptographically secure is rejected:
+    ///
+    /// ```compile_fail
+    /// use embedded_io_websocket as ws;
+    /// let ws_client = ws::WebSocketClient::new_client(ws::EmptyRng::new());
+    /// ```
+    pub fn new_client(rng: T) -> WebSocketClient<T>
+    where
+        T: CryptoRng,
+    {
         WebSocket {
             is_client: true,
             rng,

@@ -160,7 +160,7 @@ async fn wss_client(stack: Stack<'static>) {
         &target,
         tls_read,
         tls_write,
-        Rng::new(),
+        Trng::try_new().expect("the entropy source is on"),
         buffers,
         "hello from an ESP32-C3",
     )
