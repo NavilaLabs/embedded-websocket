@@ -1,7 +1,12 @@
 //! Application code shared by the embassy examples. It works on any stream that implements the
 //! `embedded-io-async` traits, for example the `TcpSocket` of `embassy-net`, so the board crates
 //! only set up the hardware and the network.
+//!
+//! TLS needs a random number generator registered with `embassy-crypto`, which each board crate
+//! provides.
 #![no_std]
+
+pub mod sntp;
 
 use embedded_io_async::{Read, Write};
 use embedded_io_websocket::{
@@ -10,15 +15,17 @@ use embedded_io_websocket::{
     MIN_FRAME_BUF_LEN,
 };
 use embedded_tls::{
-    Aes128GcmSha256, CertificateRef, CertificateVerifyRef, CryptoProvider, CryptoRngCore,
-    SignatureScheme, TlsConfig, TlsConnection, TlsContext, TlsError, TlsVerifier,
-};
-use p256::{
-    ecdsa::{signature::Verifier, Signature, VerifyingKey},
-    pkcs8::DecodePublicKey,
+    webpki::CertVerifier, Aes128GcmSha256, Certificate, TlsClock, TlsConfig, TlsConnection,
+    TlsContext, TlsError,
 };
 use rand_core::Rng;
-use sha2::{Digest, Sha256};
+// a crate that is never named is not linked, and this one provides the software crypto drivers
+use embassy_crypto_rustcrypto as _;
+
+pub use sntp::NetworkClock;
+
+/// The largest server certificate, without its chain, that [`wss_echo`] accepts.
+pub const MAX_SERVER_CERTIFICATE_LEN: usize = 4096;
 
 /// The buffers of one websocket connection.
 pub struct Buffers {
@@ -46,27 +53,23 @@ impl Default for Buffers {
 
 /// The server a [`wss_echo`] client connects to.
 pub struct WssTarget<'a> {
-    /// The host name, sent in the TLS handshake and the `Host` header.
+    /// The host name, which the server certificate must name.
     pub host: &'a str,
     /// The path of the websocket, for example `/echo`.
     pub path: &'a str,
-    /// The public key of the server as DER encoded SubjectPublicKeyInfo, which must be an ECDSA
-    /// P-256 key. Only a server that proves it holds the matching private key is trusted; its
-    /// certificate is not inspected. Keep the key when renewing the certificate, or the
-    /// firmware must be rebuilt.
-    pub server_key_der: &'a [u8],
+    /// The DER encoded root certificate that the chain of the server must lead to, for example
+    /// ISRG Root X2 for a Let's Encrypt ECDSA certificate. Only ECDSA P-256 and P-384 signatures
+    /// are checked.
+    pub ca_der: &'a [u8],
 }
 
 /// An error of [`wss_echo`].
 #[derive(Debug)]
 pub enum Error {
-    /// The TLS connection failed, for example because the server signed the handshake with
-    /// another key than the pinned one.
+    /// The clock does not know the time yet, so certificate dates cannot be checked.
+    ClockNotSet,
+    /// The TLS connection failed, for example because the certificate of the server is not valid.
     Tls(TlsError),
-    /// The TLS handshake completed without the server proving that it holds the pinned key.
-    ServerNotAuthenticated,
-    /// [`WssTarget::server_key_der`] is not a DER encoded ECDSA P-256 public key.
-    InvalidServerKey,
     /// The websocket failed.
     WebSocket(FramerError<TlsError>),
     /// The server answered with something other than a text message.
@@ -82,112 +85,40 @@ impl From<FramerError<TlsError>> for Error {
     }
 }
 
-// Trusts a server only after it signed the handshake transcript with the pinned key in its
-// CertificateVerify message (RFC 8446 section 4.4.3). embedded-tls also completes a handshake in
-// which the server sends no Certificate or CertificateVerify at all, so `is_authenticated` must
-// be checked after the handshake.
-struct PinnedKeyVerifier {
-    key: VerifyingKey,
-    certificate_transcript: Option<Sha256>,
-    is_authenticated: bool,
-}
-
-impl TlsVerifier<Aes128GcmSha256> for PinnedKeyVerifier {
-    fn set_hostname_verification(&mut self, _hostname: &str) -> Result<(), TlsError> {
-        // the pinned key identifies the server, whatever names its certificate holds
-        Ok(())
-    }
-
-    fn verify_certificate(
-        &mut self,
-        transcript: &Sha256,
-        _certificate: CertificateRef,
-    ) -> Result<(), TlsError> {
-        self.certificate_transcript = Some(transcript.clone());
-        Ok(())
-    }
-
-    fn verify_signature(&mut self, verify: CertificateVerifyRef) -> Result<(), TlsError> {
-        let transcript = self
-            .certificate_transcript
-            .take()
-            .ok_or(TlsError::InvalidSignature)?;
-        if verify.signature_scheme != SignatureScheme::EcdsaSecp256r1Sha256 {
-            return Err(TlsError::InvalidSignature);
-        }
-        let signature =
-            Signature::from_der(verify.signature).map_err(|_| TlsError::InvalidSignature)?;
-        let mut message = [0x20; 64 + 34 + 32];
-        message[64..98].copy_from_slice(b"TLS 1.3, server CertificateVerify\0");
-        message[98..].copy_from_slice(&transcript.finalize());
-        self.key
-            .verify(&message, &signature)
-            .map_err(|_| TlsError::InvalidSignature)?;
-        self.is_authenticated = true;
-        Ok(())
-    }
-}
-
-struct PinnedKeyProvider<R> {
-    rng: R,
-    verifier: PinnedKeyVerifier,
-}
-
-impl<R: CryptoRngCore> CryptoProvider for PinnedKeyProvider<R> {
-    type CipherSuite = Aes128GcmSha256;
-    type Signature = &'static [u8];
-
-    fn rng(&mut self) -> impl CryptoRngCore {
-        &mut self.rng
-    }
-
-    fn verifier(&mut self) -> Result<&mut impl TlsVerifier<Aes128GcmSha256>, TlsError> {
-        Ok(&mut self.verifier)
-    }
-}
-
-/// Opens a `wss://` connection to the server with the pinned key over `stream`, sends `message`, returns the text the
-/// server answers with and closes the connection.
+/// Opens a `wss://` connection over `stream`, sends `message`, returns the text the server
+/// answers with and closes the connection.
 ///
-/// `tls_read` must fit a whole TLS record, which is up to 16640 bytes. `tls_rng` must be a
-/// cryptographically secure random number generator; `websocket_rng` only masks frames.
+/// The certificate chain of the server must lead to `target.ca_der`, name `target.host` and be
+/// valid at the time `Clock` gives, for example [`NetworkClock`]. `tls_read` must fit a whole
+/// TLS record, which is up to 16640 bytes. `websocket_rng` only masks frames.
 ///
 /// # Errors
 ///
-/// * [`Error::InvalidServerKey`] if `target.server_key_der` is not an ECDSA P-256 public key.
-/// * [`Error::Tls`] if the TLS handshake fails, including a server that signs it with another key.
-/// * [`Error::ServerNotAuthenticated`] if the server completes the handshake without signing it.
+/// * [`Error::ClockNotSet`] if `Clock` does not know the time.
+/// * [`Error::Tls`] if the TLS handshake fails, including a certificate that is not valid for
+///   `target`.
 /// * [`Error::WebSocket`] if the opening handshake or a frame fails.
 /// * [`Error::UnexpectedReply`] if the server does not answer with a text message.
-#[allow(clippy::too_many_arguments)]
-pub async fn wss_echo<'b, S: Read + Write>(
+pub async fn wss_echo<'b, S: Read + Write, Clock: TlsClock>(
     stream: S,
     target: &WssTarget<'_>,
     tls_read: &mut [u8],
     tls_write: &mut [u8],
-    tls_rng: impl CryptoRngCore,
     websocket_rng: impl Rng,
     buffers: &'b mut Buffers,
     message: &str,
 ) -> Result<&'b str, Error> {
-    let key = VerifyingKey::from_public_key_der(target.server_key_der)
-        .map_err(|_| Error::InvalidServerKey)?;
+    // without the time the verifier would skip the dates and accept an expired certificate
+    if Clock::now().is_none() {
+        return Err(Error::ClockNotSet);
+    }
     let config = TlsConfig::new().with_server_name(target.host);
-    let mut provider = PinnedKeyProvider {
-        rng: tls_rng,
-        verifier: PinnedKeyVerifier {
-            key,
-            certificate_transcript: None,
-            is_authenticated: false,
-        },
-    };
+    let verifier: CertVerifier<Aes128GcmSha256, Clock, MAX_SERVER_CERTIFICATE_LEN> =
+        CertVerifier::new(Certificate::X509(target.ca_der));
     let mut tls = TlsConnection::new(stream, tls_read, tls_write);
-    tls.open(TlsContext::new(&config, &mut provider))
+    tls.open(TlsContext::new(&config, verifier))
         .await
         .map_err(Error::Tls)?;
-    if !provider.verifier.is_authenticated {
-        return Err(Error::ServerNotAuthenticated);
-    }
 
     let mut state = FramerState::new();
     let mut websocket = WebSocketClient::new_client(websocket_rng);

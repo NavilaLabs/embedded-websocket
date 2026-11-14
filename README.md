@@ -68,29 +68,25 @@ cargo run --example client
 cargo run --example client_async --features asynch
 ```
 
+or open `http://127.0.0.1:1337/` in your browser.
+
 ### On hardware with embassy-net
 
-`examples/embassy-pico-w` (Raspberry Pi Pico W) and `examples/embassy-esp32c3` (ESP32-C3) join a WiFi network, send one message to a `wss://` echo server over TLS 1.3 with [embedded-tls](https://crates.io/crates/embedded-tls), and then serve a `ws://` echo server on port 80. The application code is shared in `examples/embassy-common`; each board crate only sets up the chip, the WiFi driver and [embassy-net](https://crates.io/crates/embassy-net). They are separate crates with their own targets and are not part of the published package.
+`examples/embassy-pico-w` (Raspberry Pi Pico W) and `examples/embassy-esp32c3` (ESP32-C3) join a WiFi network, send one message to a `wss://` echo server over TLS 1.3 with [embedded-tls](https://github.com/embassy-rs/embedded-tls), and then serve a `ws://` echo server on port 80. The application code is shared in `examples/embassy-common`; each board crate only sets up the chip, the WiFi driver and [embassy-net](https://crates.io/crates/embassy-net), and registers the random number generator of the chip for TLS. They are separate crates with their own targets and are not part of the published package.
 
-The client pins the public key of the server: it trusts only a server that signs the TLS handshake with the matching private key, and does not look at the certificate, its chain or its names. The key must be an ECDSA P-256 key. Keep it when the certificate is renewed (for example `certbot --reuse-key`), or rebuild the firmware with the new key. Pinning a key instead of a certificate authority avoids two weaknesses of the certificate check of embedded-tls 0.19 without an allocator: it accepts a handshake in which the server proves nothing, and it does not check that the certificates in a chain may issue certificates. Fetch the key of a server with:
-
-```
-openssl s_client -connect echo.example.com:443 -servername echo.example.com </dev/null \
-    | openssl x509 -pubkey -noout | openssl pkey -pubin -outform DER > server-key.der
-```
+The client checks the certificate chain of the server like a browser does, against one root certificate: the chain must lead to it, name the host and be valid now. Only ECDSA P-256 and P-384 signatures are checked, so for a Let's Encrypt ECDSA certificate the root is ISRG Root X2. Before it connects, the client gets the time over SNTP; without it, it does not connect. SNTP is not authenticated, so an attacker on the network path who also controls the time could make an expired certificate look valid. The examples use embedded-tls from its repository at a fixed commit, because the release on crates.io (0.19.0) accepts a handshake in which the server proves nothing and does not check that the certificates in a chain may issue certificates.
 
 Configure the examples at build time:
 
 ```
 cd examples/embassy-pico-w        # or examples/embassy-esp32c3
 ./fetch-firmware.sh               # Pico W only: the firmware of the WiFi chip
+curl -O https://letsencrypt.org/certs/isrg-root-x2.der
 WIFI_SSID=... WIFI_PASSWORD=... WSS_HOST=echo.example.com WSS_PATH=/ \
-WSS_SERVER_KEY_DER=server-key.der cargo run --release
+WSS_CA_DER=isrg-root-x2.der NTP_SERVER=pool.ntp.org cargo run --release
 ```
 
-Without `WSS_SERVER_KEY_DER` the examples skip the `wss://` client. `cargo run` flashes with [probe-rs](https://probe.rs) for the Pico W and [espflash](https://github.com/esp-rs/espflash) for the ESP32-C3. `cargo test` in `examples/embassy-common` runs the client against a local TLS server, and checks that it rejects a server with another key and a server that completes the handshake without signing it.
-
-or open `http://127.0.0.1:1337/` in your browser.
+Without `WSS_CA_DER` the examples skip the `wss://` client. `cargo run` flashes with [probe-rs](https://probe.rs) for the Pico W and [espflash](https://github.com/esp-rs/espflash) for the ESP32-C3. `cargo test` in `examples/embassy-common` runs the client against a local TLS server, and checks that it rejects a server under another root, a certificate for another host, an expired certificate, a chain through a certificate that may not issue certificates, and a server that completes the handshake without signing it.
 
 ## Example websocket client usage
 

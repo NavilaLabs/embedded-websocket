@@ -7,6 +7,7 @@ description = "A wss:// client and a ws:// echo server on an ESP32-C3"
 
 [dependencies]
 embassy-common = { path = "../embassy-common" }
+embassy-crypto = { git = "https://github.com/embassy-rs/embassy", rev = "822a76ea91f2c0885c6eb0c65fe91181e31133e1" }
 
 embassy-executor = "0.10.0"
 embassy-net = { version = "0.9.1", features = ["tcp", "dhcpv4", "dns", "proto-ipv4", "medium-ethernet"] }

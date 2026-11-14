@@ -5,14 +5,15 @@
 //!
 //! * `WIFI_SSID` and `WIFI_PASSWORD`: the WPA2 network to join.
 //! * `WSS_HOST` and `WSS_PATH`: the `wss://` server, for example `echo.websocket.org` and `/`.
-//! * `WSS_SERVER_KEY_DER`: path to the public key of the `wss://` server as DER encoded
-//!   SubjectPublicKeyInfo, which must be an ECDSA P-256 key. The client trusts only a server
-//!   that proves it holds the matching private key. Without it, the example skips the `wss://`
-//!   client.
+//! * `WSS_CA_DER`: path to the DER encoded root certificate the chain of the server must lead
+//!   to, for example ISRG Root X2 for a Let's Encrypt ECDSA certificate. Only ECDSA P-256 and
+//!   P-384 signatures are checked. Without it, the example skips the `wss://` client.
+//! * `NTP_SERVER`: the server to get the time from before the `wss://` client checks the
+//!   certificate dates, `pool.ntp.org` if not set.
 #![no_std]
 #![no_main]
 
-use embassy_common::{serve_echo, wss_echo, Buffers, WssTarget};
+use embassy_common::{serve_echo, sntp, wss_echo, Buffers, NetworkClock, WssTarget};
 use embassy_executor::Spawner;
 use embassy_net::{dns::DnsQueryType, tcp::TcpSocket, Runner, Stack, StackResources};
 use embassy_time::{Duration, Timer};
@@ -49,11 +50,26 @@ const WSS_PATH: &str = match option_env!("WSS_PATH") {
     Some(path) => path,
     None => "/",
 };
-const WSS_SERVER_KEY_DER: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/server-key.der"));
+const WSS_CA_DER: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/ca.der"));
+const NTP_SERVER: &str = match option_env!("NTP_SERVER") {
+    Some(server) => server,
+    None => "pool.ntp.org",
+};
 
 // One TLS record is up to 16640 bytes; the messages this example sends are much smaller.
 const TLS_READ_LEN: usize = 16640;
 const TLS_WRITE_LEN: usize = 4096;
+
+// `Trng` is cryptographically secure while the `TrngSource` that `main` keeps alive is on.
+struct TlsRng;
+
+impl embassy_crypto::driver::Rng for TlsRng {
+    fn fill_bytes(buf: &mut [u8]) {
+        Trng::try_new().expect("the entropy source is on").read(buf);
+    }
+}
+
+embassy_crypto::rng_impl!(TlsRng);
 
 #[esp_hal::main]
 async fn main(spawner: Spawner) -> ! {
@@ -65,7 +81,7 @@ async fn main(spawner: Spawner) -> ! {
         peripherals.FROM_CPU_INTR0,
     );
 
-    // keeps the entropy source on, so `Trng` is cryptographically secure for TLS
+    // keeps the entropy source on for `TlsRng`
     let _entropy = TrngSource::new(peripherals.RNG, peripherals.ADC1);
 
     let station = Config::Station(
@@ -94,8 +110,8 @@ async fn main(spawner: Spawner) -> ! {
     stack.wait_config_up().await;
     println!("network is up");
 
-    if WSS_SERVER_KEY_DER.is_empty() {
-        println!("WSS_SERVER_KEY_DER was not set at build time, skipping the wss:// client");
+    if WSS_CA_DER.is_empty() {
+        println!("WSS_CA_DER was not set at build time, skipping the wss:// client");
     } else {
         wss_client(stack).await;
     }
@@ -103,6 +119,13 @@ async fn main(spawner: Spawner) -> ! {
 }
 
 async fn wss_client(stack: Stack<'static>) {
+    let mut nonce = [0; 8];
+    embassy_crypto::rng_fill_bytes(&mut nonce);
+    if let Err(error) = sntp::sync_clock(stack, NTP_SERVER, nonce).await {
+        println!("getting the time from {} failed: {:?}", NTP_SERVER, error);
+        return;
+    }
+
     static TLS_READ: StaticCell<[u8; TLS_READ_LEN]> = StaticCell::new();
     static TLS_WRITE: StaticCell<[u8; TLS_WRITE_LEN]> = StaticCell::new();
     static BUFFERS: StaticCell<Buffers> = StaticCell::new();
@@ -130,15 +153,13 @@ async fn wss_client(stack: Stack<'static>) {
     let target = WssTarget {
         host: WSS_HOST,
         path: WSS_PATH,
-        server_key_der: WSS_SERVER_KEY_DER,
+        ca_der: WSS_CA_DER,
     };
-    let tls_rng = Trng::try_new().unwrap();
-    let result = wss_echo(
+    let result = wss_echo::<_, NetworkClock>(
         socket,
         &target,
         tls_read,
         tls_write,
-        tls_rng,
         Rng::new(),
         buffers,
         "hello from an ESP32-C3",
